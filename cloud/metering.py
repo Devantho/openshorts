@@ -113,6 +113,29 @@ def static_failure_warrants_paid(err) -> bool:
 # executor thread that runs the probe, drained on the event loop).
 _paid_probe_events: list = []
 
+# URLs whose probe saw EVERY static IP answer the bot-check and the paid proxy
+# answer the video. Since 30-sep-2026 that verdict is per video and identical
+# on every one of our IPs (measured: 9 of 10 videos, 3 statics + the server's
+# own IP, twice each), so the download repeating the four anonymous attempts
+# costs ~8 s and four more hits on IPs YouTube is already scoring, for the
+# same answer. app.py pops the verdict when it builds the job.
+_static_bot_verdicts: set = set()
+
+
+def pop_statics_bot_checked(url) -> bool:
+    """True (once) when the probe of ``url`` found the static pool bot-checked
+    for this video and had to use the paid proxy."""
+    try:
+        _static_bot_verdicts.remove(url)
+        return True
+    except KeyError:
+        return False
+
+
+def _all_bot_checked(static_errors) -> bool:
+    return bool(static_errors) and all(
+        "not a bot" in (e or "") for e in static_errors.values())
+
 
 def pop_paid_probe_events() -> list:
     out, _paid_probe_events[:] = list(_paid_probe_events), []
@@ -293,6 +316,8 @@ def _probe_with_proxies(url, proxies, strategies, static_errors, paid, ck_path):
                         _paid_probe_events.append({
                             "url": url, "static_errors": dict(static_errors),
                             "bytes_estimate": 1_800_000 * (1 + step)})
+                        if _all_bot_checked(static_errors):
+                            _static_bot_verdicts.add(url)
                     return float(duration) / 60.0
                 last_err = ValueError("no duration in metadata")
                 if info.get("extractor") == "generic":

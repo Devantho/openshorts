@@ -427,6 +427,9 @@ async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=
         except Exception:
             pass
     minutes = max(1, math.ceil(minutes))
+    # The probe already learned whether this video is bot-checked on every
+    # static IP; the download skips those attempts then (DOWNLOAD_SKIP_STATICS).
+    request.state.skip_statics = bool(url) and _metering.pop_statics_bot_checked(url)
 
     # Free account past its balance: the first video (up to
     # FIRST_VIDEO_MAX_MINUTES) is clipped whole for the balance; any other is
@@ -1144,7 +1147,7 @@ def _install_drain_signal_handler():
 
 def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, watermark,
                            webhook_url=None, webhook_secret=None, base_url=None,
-                           partial=None, source_cap_minutes=None):
+                           partial=None, source_cap_minutes=None, skip_statics=False):
     try:
         path = os.path.join(OUTPUT_DIR, job_id, _RESUME_FILE)
         with open(path, "w") as f:
@@ -1166,6 +1169,8 @@ def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, water
                 "partial": partial,
                 # Same reason for the whole-video jobs' safety cap.
                 "source_cap_minutes": source_cap_minutes,
+                # The probe's "statics bot-checked for this video" verdict.
+                "skip_statics": bool(skip_statics),
             }, f)
     except Exception as e:
         print(f"⚠️ Could not write resume manifest for {job_id}: {e}")
@@ -1265,6 +1270,10 @@ def _resume_interrupted_jobs() -> set:
             env["SOURCE_CAP_MINUTES"] = str(m["source_cap_minutes"])
         else:
             env.pop("SOURCE_CAP_MINUTES", None)
+        if m.get("skip_statics"):
+            env["DOWNLOAD_SKIP_STATICS"] = "1"
+        else:
+            env.pop("DOWNLOAD_SKIP_STATICS", None)
 
         m["attempts"] = attempts
         try:
@@ -3118,6 +3127,11 @@ async def process_endpoint(
     else:
         env.pop("SOURCE_CAP_MINUTES", None)
         source_cap = None
+    skip_statics = bool(url) and bool(getattr(request.state, "skip_statics", False))
+    if skip_statics:
+        env["DOWNLOAD_SKIP_STATICS"] = "1"
+    else:
+        env.pop("DOWNLOAD_SKIP_STATICS", None)
     if partial:
         # main.py cuts the source down to this many minutes before anything
         # reads it, so the whole pipeline (and the editor) sees a short video.
@@ -3167,7 +3181,7 @@ async def process_endpoint(
                            watermark=jobs[job_id]['watermark'],
                            webhook_url=webhook_url, webhook_secret=webhook_secret,
                            base_url=api_base, partial=partial,
-                           source_cap_minutes=source_cap)
+                           source_cap_minutes=source_cap, skip_statics=skip_statics)
 
     _enqueue_job(job_id, priority)
 

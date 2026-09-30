@@ -694,8 +694,16 @@ def is_youtube_url(url):
     return host.endswith(("youtube.com", "youtu.be", "youtube-nocookie.com", "googlevideo.com"))
 
 
-def plan_download_attempts(direct_first, statics, paid, have_hd, youtube=True):
+def plan_download_attempts(direct_first, statics, paid, have_hd, youtube=True,
+                           skip_statics=False):
     """Ordered (label, capped, proxy) download plan — pure, unit-tested.
+
+    ``skip_statics`` (env ``DOWNLOAD_SKIP_STATICS=1``, set by app.py when the
+    metering probe already saw every static IP bot-checked for this video and
+    the paid proxy answer): go straight to the paid attempts. The verdict is
+    per video and the same on every IP (30-sep-2026), so the free attempts
+    would only add latency and more hits on IPs YouTube is scoring. Ignored
+    without a paid proxy: the statics are then all there is.
 
     ``youtube=False`` (a direct file URL): the server's own IP first, then one
     static proxy as the only fallback; the paid per-GB proxy is never used.
@@ -710,6 +718,8 @@ def plan_download_attempts(direct_first, statics, paid, have_hd, youtube=True):
         if statics:
             plan.append(('static-fallback', False, statics[0]))
         return plan
+    if skip_statics and paid:
+        statics, direct_first = [], False
     plan = []
     if direct_first:
         plan.append(('HD-direct', False, None))
@@ -1048,6 +1058,10 @@ def download_youtube_video(url, output_dir=".", on_audio=None):
     # Every attempt asks for the same 1080p spec: the fallback used to ask
     # for `best[ext=mp4]/best`, the best single-file format, which on
     # YouTube is the 360p progressive one even with 1080p streams listed.
+    _skip_statics = os.environ.get("DOWNLOAD_SKIP_STATICS", "").strip() == "1"
+    if _skip_statics and _proxy and is_youtube_url(url):
+        print("🌐 The probe found the static IPs bot-checked for this video: "
+              "downloading through the paid proxy directly.")
     attempts = [
         (label,
          fallback_args if label.startswith('fallback') else hd_args,
@@ -1055,7 +1069,8 @@ def download_youtube_video(url, output_dir=".", on_audio=None):
          proxy,
          not (label.startswith('fallback') and hd_args))
         for label, capped, proxy in plan_download_attempts(
-            _direct_first, _statics, _proxy, bool(hd_args), youtube=is_youtube_url(url))
+            _direct_first, _statics, _proxy, bool(hd_args), youtube=is_youtube_url(url),
+            skip_statics=_skip_statics)
     ]
     if not is_youtube_url(url):
         print("🌐 Direct file URL: downloading from the server's own IP (no proxy).")

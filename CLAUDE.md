@@ -718,7 +718,19 @@ ones: while it named the pages it knew, a hashtag page and the legacy
 `/<vanity>` channel URL went straight through, and one of them walked to
 page 23 on the static pool and then paid the per-GB proxy to walk it
 again (20-sep-2026).
-`PAID_PROXY_DAILY_MB` (default
+Since 30-sep-2026 YouTube answers the bot-check to anonymous requests
+from every one of our non-residential IPs (the 3 statics and the server's
+own IP alike), **per video**: the same video fails on all of them and a few
+popular ones pass on all of them, whatever the client (web, mweb, ios,
+android_vr, tv, web_embedded, with or without a player PO token). Only an
+authenticated session or a residential IP gets through. So when the probe
+saw every static bot-checked and the paid proxy answer, the job carries
+`DOWNLOAD_SKIP_STATICS=1` (`metering.pop_statics_bot_checked`, also in the
+resume manifest) and `plan_download_attempts` goes straight to the paid
+attempts instead of repeating four anonymous hits for the same verdict.
+The proxy watcher also checks the ytcfg `LOGGED_IN` marker when
+`YOUTUBE_COOKIES` is set and pages on the first probe that says the session
+is gone. `PAID_PROXY_DAILY_MB` (default
 500) is the hard ceiling: past it the paid proxy is dropped from the probe
 and from every new job's env until UTC midnight. The watcher probes the
 static pool against a real YouTube watch page (playable markers), not
