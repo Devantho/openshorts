@@ -3916,6 +3916,12 @@ class SubtitleRequest(BaseModel):
     effect: str = "none"  # none | glow | pop | box (karaoke only)
     base_opacity: float = 1.0  # opacity of non-active words (dimmed modern look)
     uppercase: bool = False
+    reveal: bool = False  # karaoke: words appear as they are spoken
+    shadow: int = 0  # karaoke: drop shadow depth, 0-6
+    # Words per line, as a character budget (1 = one word at a time). None
+    # keeps the generator's defaults, which is what old clients send.
+    max_chars: Optional[int] = None
+    max_duration: Optional[float] = None
     input_filename: Optional[str] = None
     # User-edited caption words. When present, the burn uses them VERBATIM
     # instead of regenerating from the stored transcript — without this, text
@@ -4927,7 +4933,12 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         border_width=req.border_width, highlight_color=req.highlight_color,
         bg_color=req.bg_color, bg_opacity=req.bg_opacity,
         effect=req.effect, base_opacity=req.base_opacity, uppercase=req.uppercase,
+        reveal=req.reveal, shadow=req.shadow,
     )
+    if req.max_chars is not None:
+        karaoke_opts["max_chars"] = max(1, min(40, int(req.max_chars)))
+    if req.max_duration is not None:
+        karaoke_opts["max_duration"] = max(0.5, min(5.0, float(req.max_duration)))
 
     # Output video
     # We create a new file "subtitled_..."
@@ -4973,7 +4984,9 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         elif is_karaoke:
             success = generate_ass(sub_transcript, sub_start, sub_end, srt_path, **karaoke_opts)
         else:
-            success = generate_srt(sub_transcript, sub_start, sub_end, srt_path)
+            success = generate_srt(sub_transcript, sub_start, sub_end, srt_path,
+                                   karaoke_opts.get("max_chars", 20),
+                                   karaoke_opts.get("max_duration", 2.0))
 
         if not success:
              raise HTTPException(status_code=400, detail="No words found for this clip range.")

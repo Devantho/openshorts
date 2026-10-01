@@ -306,7 +306,8 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
                  border_color="#000000", border_width=2,
                  highlight_color="#FFD700", bg_color="#000000", bg_opacity=0.0,
                  effect="none", base_opacity=1.0, uppercase=False,
-                 margin_v=SAFE_MARGIN_V, split_ranges=None):
+                 margin_v=SAFE_MARGIN_V, split_ranges=None,
+                 reveal=False, shadow=0):
     """
     Generates a karaoke-style ASS file: each block is shown like the SRT path,
     but the currently spoken word is rendered in highlight_color (modern
@@ -314,9 +315,17 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     the highlight moves with the audio without flicker.
 
     effect: "none" | "glow" (neon shine around the active word) |
-            "pop" (active word scales up) | "box" (thick colored outline).
+            "pop" (active word scales up) | "box" (thick colored outline) |
+            "highlight" (active word on a solid box in highlight_color, the
+            CapCut / Submagic look).
     base_opacity: opacity of the non-active words — dimmed base text is the
     modern captioneer look (e.g. 0.4).
+    reveal: words not spoken yet are invisible, so the line builds up word
+    by word (Hormozi style). They keep their slot (alpha, not removal), so
+    the line never reflows while it fills.
+    shadow: drop shadow depth in PlayRes units (0 = none). With border_width
+    0 it is the soft "clean" look; a hard outline does not need it.
+    max_chars=1 puts one word on screen at a time.
     """
     blocks = _collect_word_blocks(transcript, clip_start, clip_end, max_chars, max_duration)
     if not blocks:
@@ -350,6 +359,7 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     primary_colour = hex_to_ass_color(_dim_hex_color(font_color, base_opacity), 1.0)
     bg_opacity = _clamp_number(bg_opacity, 0.0, 1.0, 0.0)
     border_width = _clamp_number(border_width, 0, 10, 2)
+    shadow = int(_clamp_number(shadow, 0, 6, 0))
 
     if bg_opacity > 0:
         border_style = 3
@@ -358,9 +368,12 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     else:
         border_style = 1
         outline_colour = hex_to_ass_color(border_color, 1.0, fallback="000000")
-        outline_width = max(1, int(border_width))
+        # 0 is a real choice now (the shadow-only "clean" look); before the
+        # slider's "None" still drew a 1px outline. Without a shadow keep the
+        # old floor, or white text on a white wall disappears.
+        outline_width = int(border_width) if shadow else max(1, int(border_width))
 
-    back_colour = hex_to_ass_color("#000000", 0.0)
+    back_colour = hex_to_ass_color("#000000", 0.55 if shadow else 0.0)
     highlight_inline = _hex_to_ass_inline_color(highlight_color, fallback="FFD700")
 
     # Inline override tags for the active word; {\r} after it resets to the
@@ -373,6 +386,12 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
         box_bord = max(4, int(outline_width) + 3)
         active_prefix = (f"{{\\c&HFFFFFF&\\3c{highlight_inline}"
                          f"\\bord{box_bord}\\blur0}}")
+    elif effect == "highlight":
+        # A second style with BorderStyle 3 draws an opaque box around just
+        # the active word (libass boxes each style run separately). The text
+        # on it flips to black when the box is light, or yellow would carry
+        # white text nobody can read.
+        active_prefix = "{\\rActive}"
     elif effect == "pop":
         # Gentle pop. The old 75->112 range started the word so small that any
         # frame caught mid-animation read as a sizing bug rather than a beat.
@@ -380,6 +399,19 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
                          f"\\fscx90\\fscy90\\t(0,110,\\fscx108\\fscy108)}}")
     else:
         active_prefix = f"{{\\c{highlight_inline}}}"
+
+    active_style = ""
+    if effect == "highlight":
+        box_colour = hex_to_ass_color(highlight_color, 1.0, fallback="FFD700")
+        on_box = "#000000" if _luminance(highlight_color) > 0.6 else font_color
+        # Padding scales with the text so the box keeps its shape at any size.
+        pad = max(2, round(final_fontsize * 0.12))
+        active_style = (
+            f"Style: Active,{safe_font},{final_fontsize},"
+            f"{hex_to_ass_color(on_box, 1.0)},{hex_to_ass_color(on_box, 1.0)},"
+            f"{box_colour},{box_colour},1,0,0,0,100,100,0,0,3,{pad},0,"
+            f"{ass_alignment},10,10,{int(_clamp_number(margin_v, 0, 200, SAFE_MARGIN_V))},1\n"
+        )
 
     header = (
         "[Script Info]\n"
@@ -395,7 +427,8 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,{safe_font},{final_fontsize},{primary_colour},{primary_colour},"
         f"{outline_colour},{back_colour},1,0,0,0,100,100,0,0,{border_style},"
-        f"{outline_width},0,{ass_alignment},10,10,{int(_clamp_number(margin_v, 0, 200, SAFE_MARGIN_V))},1\n"
+        f"{outline_width},{shadow},{ass_alignment},10,10,{int(_clamp_number(margin_v, 0, 200, SAFE_MARGIN_V))},1\n"
+        f"{active_style}"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -418,6 +451,8 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
                     text = text.upper()
                 if j == i:
                     parts.append(f"{active_prefix}{text}{{\\r}}")
+                elif reveal and j > i:
+                    parts.append(f"{{\\alpha&HFF&}}{text}{{\\r}}")
                 else:
                     parts.append(text)
 
@@ -463,6 +498,15 @@ def hex_to_ass_color(hex_color, opacity=1.0, fallback="FFFFFF"):
     b = int(hex_digits[4:6], 16)
     alpha = round((1.0 - opacity) * 255)
     return f"&H{alpha:02X}{b:02X}{g:02X}{r:02X}"
+
+
+def _luminance(hex_color):
+    """Relative brightness 0-1 of #RRGGBB (Rec. 601 weights); 1.0 if invalid."""
+    hex_digits = str(hex_color or "").lstrip('#')
+    if not _HEX_COLOR_RE.match(hex_digits):
+        return 1.0
+    r, g, b = (int(hex_digits[i:i + 2], 16) for i in (0, 2, 4))
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255
 
 
 def _clamp_number(value, lo, hi, default):

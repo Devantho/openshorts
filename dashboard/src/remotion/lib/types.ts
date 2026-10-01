@@ -24,12 +24,21 @@ export interface SubtitleStyle {
   // Karaoke look: dim inactive words (0-1) and force uppercase.
   baseOpacity?: number;
   uppercase?: boolean;
+  // Words not spoken yet stay invisible (keep their slot), as burned.
+  reveal?: boolean;
+  // Drop shadow depth in burn units (subtitles.generate_ass `shadow`).
+  shadow?: number;
+  // Text colour on the active-word box ("karaoke" animation).
+  highlightTextColor?: string;
 }
 
 export interface SubtitleConfig {
   captions: CaptionWord[];
   position: SubtitlePosition;
   style: SubtitleStyle;
+  // Line budget, mirrors the burn's max_chars / max_duration.
+  maxChars?: number;
+  maxDurationMs?: number;
 }
 
 // --- Hook config ---

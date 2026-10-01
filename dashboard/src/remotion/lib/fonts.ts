@@ -60,6 +60,8 @@ export const SUBTITLE_FONTS: Record<string, string> = {
   Helvetica: "Helvetica, Arial, sans-serif",
   Georgia: "Georgia, 'Times New Roman', serif",
   "Courier New": "'Courier New', Courier, monospace",
+  Anton: `'${ANTON_FONT_FAMILY}', Impact, sans-serif`,
+  "Montserrat ExtraBold": `'${MONTSERRAT_FONT_FAMILY}', 'Montserrat', sans-serif`,
 };
 
 export function getFontStack(fontFamily: string): string {

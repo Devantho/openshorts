@@ -596,6 +596,10 @@ function App() {
             effect: options.effect || 'none',
             base_opacity: options.baseOpacity ?? 1.0,
             uppercase: options.uppercase || false,
+            reveal: options.reveal || false,
+            shadow: options.shadow || 0,
+            max_chars: options.maxChars ?? null,
+            max_duration: options.maxDuration ?? null,
             // Chain from the clip's current server file (its video_url basename).
             input_filename: (clips[i].video_url || '').split('/').pop(),
           }),
