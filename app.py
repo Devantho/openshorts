@@ -3708,7 +3708,7 @@ async def _ensure_job_files(job_id: str, request: Request) -> bool:
 
 
 from editor import VideoEditor
-from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_from_video
+from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_from_video, CAPTION_PRESETS
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import (analyze_video_for_titles, refine_titles, generate_thumbnail,
@@ -3922,6 +3922,9 @@ class SubtitleRequest(BaseModel):
     # keeps the generator's defaults, which is what old clients send.
     max_chars: Optional[int] = None
     max_duration: Optional[float] = None
+    # Named look (subtitles.CAPTION_PRESETS); any field sent explicitly
+    # alongside it overrides that field of the preset.
+    preset: Optional[str] = None
     input_filename: Optional[str] = None
     # User-edited caption words. When present, the burn uses them VERBATIM
     # instead of regenerating from the stored transcript — without this, text
@@ -4827,6 +4830,14 @@ async def generate_effects_config(
 
 @app.post("/api/subtitle")
 async def add_subtitles(req: SubtitleRequest, request: Request):
+    if req.preset:
+        preset = CAPTION_PRESETS.get(req.preset.strip().lower())
+        if preset is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown preset. Use one of: {', '.join(CAPTION_PRESETS)}.")
+        req = req.model_copy(update={k: v for k, v in preset.items()
+                                     if k not in req.model_fields_set})
     await require_managed_entitlement(request)
     await _ensure_job_files(req.job_id, request)
     if req.job_id not in jobs:

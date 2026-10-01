@@ -253,6 +253,50 @@ AUTO_CAPTION_STYLE = {
 }
 
 
+# Named looks for /api/subtitle `preset` (and the MCP add_subtitles tool), in
+# request-field names. Mirrors the dashboard's CAPTION_PRESETS in
+# SubtitleModal.jsx (a test checks the ids): "default" is what every clip
+# ships with, the rest are the short-form looks trending in 2026.
+_PRESET_BASE = {"style": "karaoke", "font_color": "#FFFFFF", "bg_opacity": 0.0,
+                "base_opacity": 1.0, "reveal": False, "shadow": 0,
+                "max_duration": 1.4}
+CAPTION_PRESETS = {
+    "default": {**_PRESET_BASE, "font_name": "Anton", "font_size": 44,
+                "highlight_color": "#FFE500", "border_width": 4, "effect": "pop",
+                "uppercase": True, "max_chars": 16},
+    # Words appear as they are spoken, yellow active word, shadow.
+    "hormozi": {**_PRESET_BASE, "font_name": "Montserrat ExtraBold", "font_size": 44,
+                "highlight_color": "#FFE500", "border_width": 4, "shadow": 2,
+                "effect": "pop", "uppercase": True, "reveal": True, "max_chars": 9},
+    # Solid box behind the active word (CapCut / Submagic).
+    "pill": {**_PRESET_BASE, "font_name": "Montserrat ExtraBold", "font_size": 44,
+             "highlight_color": "#7C3AED", "border_width": 3, "effect": "highlight",
+             "uppercase": True, "max_chars": 9},
+    "lime": {**_PRESET_BASE, "font_name": "Montserrat ExtraBold", "font_size": 44,
+             "highlight_color": "#A3FF12", "border_width": 3, "effect": "highlight",
+             "uppercase": True, "max_chars": 9},
+    # One big word at a time.
+    "oneword": {**_PRESET_BASE, "font_name": "Anton", "font_size": 70,
+                "highlight_color": "#FFFFFF", "border_width": 5, "effect": "pop",
+                "uppercase": True, "max_chars": 1},
+    # No outline, soft shadow, sentence case.
+    "clean": {**_PRESET_BASE, "font_name": "Montserrat ExtraBold", "font_size": 34,
+              "highlight_color": "#FFFFFF", "border_width": 0, "shadow": 2,
+              "effect": "none", "uppercase": False, "base_opacity": 0.7,
+              "max_chars": 12},
+}
+
+# Characters per line at font size 44, per font (Anton is condensed,
+# Montserrat wide). Mirrors lineBudget in SubtitleModal.jsx.
+_LINE_CHARS = {"Anton": 16, "Montserrat ExtraBold": 9, "Impact": 16}
+
+
+def line_budget(font_name, font_size):
+    """max_chars that keeps one line inside the 9:16 frame at this size."""
+    size = _clamp_number(font_size, 10, 200, 44)
+    return max(6, round(_LINE_CHARS.get(font_name, 14) * 44 / size))
+
+
 def _ass_time(seconds):
     """Format seconds as ASS timestamp H:MM:SS.cc (centiseconds)."""
     seconds = max(0, seconds)

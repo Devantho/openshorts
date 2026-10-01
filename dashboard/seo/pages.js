@@ -1125,7 +1125,7 @@ snippets for Claude Desktop, Cursor, n8n and curl.</p>
 <tr><td><code>get_job_status</code></td><td>Progress, recent log lines, and the clips once the job completes.</td></tr>
 <tr><td><code>list_clips</code></td><td>Titles, durations, platform-ready descriptions and download URLs for a finished job.</td></tr>
 <tr><td><code>get_quota</code></td><td>Plan and remaining minutes, so an agent can check before starting a large job.</td></tr>
-<tr><td><code>add_subtitles</code></td><td>Restyles the burned-in captions of one clip, classic or karaoke word highlighting.</td></tr>
+<tr><td><code>add_subtitles</code></td><td>Restyles the burned-in captions of one clip: presets (default, hormozi, pill, lime, oneword, clean), size, word-by-word reveal, a box behind the active word or one word at a time.</td></tr>
 <tr><td><code>publish_clip</code></td><td>Posts or schedules one clip to TikTok, Instagram or YouTube through the connected account.</td></tr>
 </tbody>
 </table>
