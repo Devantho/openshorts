@@ -1,6 +1,7 @@
 import time
 import cv2
 import subprocess
+import shutil
 import argparse
 import re
 import sys
@@ -1394,12 +1395,14 @@ def watermark_filter(vw, vh, video="[0:v]", logo="[1:v]", out=""):
     )
 
 
-def apply_watermark(video_path):
+def apply_watermark(video_path, output_path=None):
     """Burn the OpenShorts watermark into a finished clip (free plan).
 
-    One re-encode pass on the final file so every output format (TRACK,
-    GENERAL, horizontal passthrough) gets the mark, and later subtitle/hook
-    re-encodes keep it — they re-encode the already-marked pixels.
+    One re-encode pass over the final file so every output format (TRACK,
+    GENERAL, horizontal passthrough) gets the mark. In place by default; with
+    ``output_path`` the source stays untouched and the marked copy is written
+    there, which is how the pipeline keeps the clean file next to the served
+    one (see ``mark_delivery``).
     """
     logo_path = watermark_logo_path()
     if not os.path.exists(logo_path):
@@ -1420,7 +1423,7 @@ def apply_watermark(video_path):
         return False
 
     filt = watermark_filter(vw, vh)
-    tmp_path = video_path + ".wm.mp4"
+    tmp_path = (output_path or video_path) + ".wm.mp4"
     cmd = ["ffmpeg", "-y", "-i", video_path, "-i", logo_path,
            "-filter_complex", filt,
            *video_encode_args(QUALITY), "-c:a", "copy", *METADATA_SCRUB,
@@ -1428,13 +1431,44 @@ def apply_watermark(video_path):
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             timeout=1800)
     if result.returncode == 0 and os.path.exists(tmp_path):
-        os.replace(tmp_path, video_path)
+        os.replace(tmp_path, output_path or video_path)
         return True
     err = (result.stderr or b"").decode(errors="ignore")[-300:]
     print(f"   ⚠️ Watermark pass failed (clip kept unmarked): {err}")
     if os.path.exists(tmp_path):
         os.remove(tmp_path)
     return False
+
+
+def mark_delivery(final_path, marker=None):
+    """The free-plan copy of a finished clip to serve: ``wm_<final>`` next to it.
+
+    The clean ``final_path`` is left as it is. That is the whole point: an
+    upgrade re-points the clip at the clean twin instead of re-running the
+    job (``watermarked`` module). An existing copy is reused, so re-choosing
+    a file the user already had (captions off, hook off) costs no encode.
+
+    Returns the marked path, or ``final_path`` itself when the copy could not
+    be made: the mark must never cost the user the clip (same fail-open rule
+    apply_watermark has always had).
+    """
+    import watermarked
+    out_path = os.path.join(os.path.dirname(final_path),
+                            watermarked.marked_name(final_path))
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return out_path
+    ok = (marker or apply_watermark)(final_path, out_path)
+    if ok and os.path.exists(out_path):
+        return out_path
+    # Still the wm_ name: the /videos guard refuses the clean deliverables of
+    # a free job, so serving the clean name here would be a clip the user
+    # cannot play. The copy simply carries no mark.
+    print(f"   ⚠️ Serving {os.path.basename(final_path)} unmarked (copy).")
+    try:
+        shutil.copyfile(final_path, out_path)
+        return out_path
+    except OSError:
+        return final_path
 
 
 def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPECT_RATIO,
@@ -2406,16 +2440,15 @@ if __name__ == '__main__':
                     # ffmpeg cut — re-encoding for precision on strict seconds
                     cut_clip(input_video, clip_temp_path, start, end, i + 1)
 
-                    # Layer order: watermark burns into the canonical (so any
-                    # later hook replacement, which re-derives from it, keeps
-                    # the branding), the hook is a derived hooked_ file, and
-                    # captions go last on top of whichever is current. The
-                    # watermark rides the reframe's own encode instead of a
-                    # pass of its own: one encode less per clip on every
-                    # free-plan job. Each worker writes only its own clip
-                    # dict, so the re-dump after the pool is race-free.
-                    success = render_clip(clip_temp_path, clip_final_path, output_format,
-                                          watermark=os.environ.get("WATERMARK") == "1")
+                    # Layer order: the canonical reframe stays CLEAN, the hook
+                    # is a derived hooked_ file, captions go last on top of
+                    # whichever is current, and on the free plan the served
+                    # file is a wm_ copy of that final (mark_delivery). The
+                    # mark used to ride the reframe encode, which made it
+                    # permanent: paying could not remove it from clips already
+                    # made. Each worker writes only its own clip dict, so the
+                    # re-dump after the pool is race-free.
+                    success = render_clip(clip_temp_path, clip_final_path, output_format)
                     if success:
                         print(f"   🎞️ Clip {i+1} framed")
                     deliver_path = clip_final_path
@@ -2446,6 +2479,9 @@ if __name__ == '__main__':
                             captioned = auto_caption_clip(
                                 deliver_path, transcript, start, end,
                                 split_ranges=split_ranges)
+                        served = captioned or deliver_path
+                        if os.environ.get("WATERMARK") == "1":
+                            served = mark_delivery(served)
                         print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
                         # Hand the API the file to actually serve for this clip.
                         # Without it the status poller guesses the clean reframe
@@ -2455,8 +2491,7 @@ if __name__ == '__main__':
                         # Printed only after the full chain (reframe, watermark,
                         # hook, captions) so the file is complete when it is
                         # announced, never one that ffmpeg is still writing.
-                        print(f"CLIP_READY {i} "
-                              f"{os.path.basename(captioned or deliver_path)}")
+                        print(f"CLIP_READY {i} {os.path.basename(served)}")
                     return success
                 finally:
                     if os.path.exists(clip_temp_path):
@@ -2468,6 +2503,11 @@ if __name__ == '__main__':
             clip_workers = max(int(os.environ.get("CLIP_WORKERS", "6")), 1)
             shorts = clips_data['shorts']
             failed = []
+            if os.environ.get("WATERMARK") == "1":
+                # Tells the /videos guard that the clean twins in this
+                # directory are not for serving (watermarked.MARKER_FILE).
+                import watermarked
+                watermarked.mark_job(output_dir)
             with ThreadPoolExecutor(max_workers=min(clip_workers, len(shorts))) as pool:
                 # Best clip first: the pool starts work in submission order, so
                 # the user's first delivered clip is the strongest one instead

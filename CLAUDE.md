@@ -183,6 +183,44 @@ otherwise process 45 minutes on a 20-minute reservation. `/api/status` and
 the process response carry `partial`, and the results view says which part
 of the video the clips came from, with the upsell for the rest.
 
+### The free plan's watermark is a copy, and paying removes it (`watermarked.py`)
+
+Every file the pipeline and the clip editor write is clean. On the free plan
+the file that is *served* is `wm_<final>`, a copy of the final file with the
+mark burned in (`main.mark_delivery`, the last step after captions; the
+editor endpoints get it from `app._deliver`, decided from the caller's plan
+right now, not from the job's flag, which a restart loses). Both twins live
+on disk and in R2 (`cloud.videos._twins_to_archive`). Before 30-sep-2026 the
+mark was burned into the canonical reframe, so every derivative inherited it
+and the upgrade modal's "upgrade to remove the watermark" was false for the
+clips already made: the first cancellation for "clip quality" was a user who
+paid 15 minutes after their first job and kept the mark on every download.
+
+- **Upgrade**: `cloud/billing._upsert_subscription` fires
+  `videos.unmark_user_library` on the free→live transition
+  (`became_live`). Per clip it checks the clean twin exists in R2, moves the
+  history row and the project state to it, deletes the marked object and
+  calls back into `app._unmark_local_job` so an open dashboard polls the
+  clean URL. No render, no source video. The dashboard chases the job
+  result after the plan flips (`App.jsx`, the `wm_` regex) and refreshes
+  the durable map.
+- **Walk-backs**: `wm_` is the outermost layer; `_strip_burned_captions` /
+  `_strip_burned_hook` drop it first, `_canonical_clip_file` globs
+  `wm_*{clean}`.
+- **`/videos` guard** (`app._media_guard`): a job rendered for the free plan
+  carries a `.marked` dotfile (`watermarked.MARKER_FILE`, written by
+  main.py, restored with the project, removed on unmark; `_deliver` marks
+  only jobs that carry it, so a job from before this scheme, whose canonical
+  has the mark burned in, never gets a second one);
+  while it exists the clean deliverables of that job are refused, so the
+  twin cannot be fetched by stripping the prefix off a URL. The editor's
+  `temp_*` scratch files and the caption sidecars stay servable.
+- **Notice**: `WatermarkModal` shows once per job when the clips land on a
+  free account (`source=results`, 2.5 s after the grid) and, if skipped,
+  before the first download; tracked as `WatermarkNoticeSeen` /
+  `WatermarkNoticeUpgrade` with `source`. Its Upgrade opens the upsell
+  `TopUpModal`.
+
 ### Free sources past the balance never meet the wall (`app.free_overflow`)
 
 Since 28-sep-2026 the wall above only shows to paid plans and to free
@@ -601,8 +639,9 @@ checked by eye, audio identical):
 - **Silero VAD on one CPU thread** (`vad_load_kwargs`): on CUDA it ran one
   32 ms chunk per launch and was most of the transcription's wall time.
 - **Blur at quarter size** (`ffmpeg_utils.blurred_backdrop`).
-- **Watermark inside the reframe encode** (`reframe_v2.render(watermark=)`),
-  not a pass of its own (most jobs are free plan).
+- **Watermark as a served copy** (`main.mark_delivery`, see the section
+  on the free plan's watermark): one NVENC pass per free clip, after
+  captions. It used to ride the reframe encode, which made it permanent.
 - **hooked_ + subtitled_ from one ffmpeg** (`hooks.add_hook_to_video(also=)`):
   the editor still needs both files (re-caption walks back to hooked_,
   hook replace to the canonical), so nothing is skipped, only one decode.

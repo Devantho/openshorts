@@ -14,6 +14,8 @@ import ClipEditor from './components/ClipEditor';
 import ReframeEditor from './components/ReframeEditor';
 import UsageMeter from './components/UsageMeter';
 import TopUpModal from './components/TopUpModal';
+import WatermarkModal, { watermarkNoticeDismissed } from './components/WatermarkModal';
+import { getApiUrl } from './config';
 import StarBanner from './components/StarBanner';
 import PlanChoiceModal from './components/PlanChoiceModal';
 import ClipTutorial from './components/ClipTutorial';
@@ -270,6 +272,9 @@ function App() {
   const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showTopUp, setShowTopUp] = useState(false);
+  // Free plan: "want the watermark off?" once per job, when the clips land.
+  const [showWmNotice, setShowWmNotice] = useState(false);
+  const wmNoticedJobRef = useRef(null);
   const [showPlanChoice, setShowPlanChoice] = useState(false);
   const [tutorialPhase, setTutorialPhase] = useState(null); // null | intro | coach | celebrate
   const [showTrialUpgrade, setShowTrialUpgrade] = useState(false);
@@ -434,6 +439,47 @@ function App() {
   // map on a backoff until the archived name matches the clip's new file, then it
   // can play from R2 again. Gives up quietly: staying on /videos is correct, just
   // slower, and is exactly what happens for self-hosted users all the time.
+  const openUpsell = () => { setTopUpInfo({ context: 'upsell' }); setShowTopUp(true); };
+
+  // The clips just landed on a free account: ask once, per job, whether they
+  // want the mark off. A beat after the grid renders, so the first thing they
+  // see is their clips and not a modal over them.
+  useEffect(() => {
+    if (status !== 'complete' || plan !== 'free' || !isManaged || !jobId) return;
+    if (!(results?.clips?.length > 0)) return;
+    if (wmNoticedJobRef.current === jobId || watermarkNoticeDismissed(jobId)) return;
+    wmNoticedJobRef.current = jobId;
+    const t = setTimeout(() => { if (jobIdRef.current === jobId) setShowWmNotice(true); }, 2500);
+    return () => clearTimeout(t);
+  }, [status, plan, isManaged, jobId, results?.clips?.length]);
+
+  // Paying re-points the clips already on screen at their clean twins (the API
+  // does it from the Stripe webhook, a few seconds after the plan flips). Chase
+  // the job result until no served file carries the wm_ prefix, then refresh
+  // the durable map so the players switch to the clean R2 copies too.
+  useEffect(() => {
+    if (!isManaged || !jobId || !plan || plan === 'free') return;
+    const isMarked = (c) => /\/wm_[^/]*$/.test(c?.video_url || '');
+    if (!(results?.clips || []).some(isMarked)) return;
+    let cancelled = false;
+    (async () => {
+      for (const delay of [1500, 3000, 6000, 12000, 20000]) {
+        await new Promise((r) => setTimeout(r, delay));
+        if (cancelled || jobIdRef.current !== jobId) return;
+        let data;
+        try { data = await pollJob(jobId); } catch { continue; }
+        if (cancelled || jobIdRef.current !== jobId) return;
+        if (data?.result) setResults(data.result);
+        if (!(data?.result?.clips || []).some(isMarked)) {
+          fetchDurableMap().then((m) => { if (!cancelled) setDurableClips(m); }).catch(() => {});
+          return;
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan, isManaged, jobId]);
+
   const chaseDurableFile = async (index, expectedFile) => {
     const forJob = jobId;
     for (const delay of [2500, 6000, 15000, 30000]) {
@@ -2146,8 +2192,8 @@ function App() {
                         className="w-full text-left px-3 py-2.5 rounded-input bg-paper3 border border-brass/40 hover:border-brass text-sm transition-colors"
                       >
                         <span className="text-ink">Like these clips?</span>{' '}
-                        <span className="text-muted">They carry a watermark and delete in 7 days.</span>{' '}
-                        <span className="text-brass font-medium">Keep them forever →</span>
+                        <span className="text-muted">Upgrade and these exact clips lose the watermark on the spot, and stay for good.</span>{' '}
+                        <span className="text-brass font-medium">Remove the watermark →</span>
                       </button>
                     )}
                     {/* Distribution nudge at the same peak: clips on screen,
@@ -2215,6 +2261,7 @@ function App() {
                           jobId={jobId}
                           onEditClip={(index) => setEditingClip(index)}
                           onReframeClip={(index) => setReframingClip(index)}
+                          onUpgrade={isManaged ? openUpsell : null}
                           initialState={projectState?.clips?.find((c) => c.index === i) || null}
                           onStateChange={handleClipStateChange}
                           durable={durableClips[i]}
@@ -2423,6 +2470,15 @@ function App() {
         />
       )}
       {showPlanChoice && <PlanChoiceModal onClose={() => setShowPlanChoice(false)} />}
+      {showWmNotice && (
+        <WatermarkModal
+          source="results"
+          jobId={jobId}
+          previewSrc={results?.clips?.[0]?.video_url ? getApiUrl(results.clips[0].video_url) : null}
+          onUpgrade={openUpsell}
+          onClose={() => setShowWmNotice(false)}
+        />
+      )}
       {showTopUp && (
         <TopUpModal
           onClose={() => setShowTopUp(false)}

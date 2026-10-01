@@ -297,7 +297,8 @@ async def send_winback_email(user_id, email: str, promo_code: str = "",
         <h2>Liked your clips?</h2>
         <p>Free clips carry a watermark and are deleted after 7 days. Starter
            ($12/mo) gives you 100 minutes a month, no watermark, and clips
-           stored forever.</p>
+           stored forever. The clips you already made lose the mark the
+           moment you upgrade.</p>
         {offer}
         {_cta(pricing, "See plans")}
         <p style="color:#666;font-size:13px">Cancel anytime.</p>

@@ -31,6 +31,8 @@ from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import recut
 import layout_ranges
+import watermarked
+import media_auth
 
 load_dotenv()
 
@@ -683,10 +685,13 @@ def _canonical_clip_file(output_dir, base_name, index):
         # captioned hooks; the bare recut_/hooked_/hook_ patterns cover
         # derivations that shipped uncaptioned (hook_ is the legacy manual-
         # hook prefix, kept so old jobs still resolve).
+        # wm_*{clean} is the free plan's marked copy of any of those (or of
+        # the clean file itself: the * matches nothing), written last.
         derived = (glob.glob(os.path.join(output_dir, f"subtitled_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"recut_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"hooked_*_{clean}"))
-                   + glob.glob(os.path.join(output_dir, f"hook_{clean}")))
+                   + glob.glob(os.path.join(output_dir, f"hook_{clean}"))
+                   + glob.glob(os.path.join(output_dir, f"wm_*{clean}")))
     except Exception:
         derived = []
     if not derived:
@@ -739,6 +744,21 @@ def _clips_actually_rendered(job_id, output_dir, base_name, clips):
     return kept, len(clips) - len(kept)
 
 
+def _strip_watermark_copy(output_dir, filename):
+    """``wm_<final>`` -> ``<final>`` when the clean twin is on disk.
+
+    The free plan serves a marked copy of the final file and keeps the clean
+    one next to it (see the ``watermarked`` module); every derivation starts
+    from the clean one, so the mark is always the outermost layer to strip.
+    Same fail-safe contract as the other walk-backs: unchanged when there is
+    nothing to strip or the twin is gone."""
+    if watermarked.is_marked(filename):
+        clean = watermarked.clean_name(filename)
+        if os.path.exists(os.path.join(output_dir, clean)):
+            return clean
+    return filename
+
+
 def _strip_burned_captions(output_dir, filename):
     """Walk ``subtitled_<ts>_`` prefixes back to the file without burned captions.
 
@@ -746,6 +766,7 @@ def _strip_burned_captions(output_dir, filename):
     underlying file is gone, e.g. a library restore that only kept the current
     version).
     """
+    filename = _strip_watermark_copy(output_dir, filename)
     while True:
         m = re.match(r'^subtitled_\d+_(.+)$', filename)
         if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
@@ -758,11 +779,86 @@ def _strip_burned_hook(output_dir, filename):
     without a burned hook. Same fail-safe contract as _strip_burned_captions:
     the name is returned unchanged when there is nothing to strip or the
     underlying file is gone."""
+    filename = _strip_watermark_copy(output_dir, filename)
     while True:
         m = re.match(r'^(?:hooked_\d+_|hook_)(.+)$', filename)
         if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
             return filename
         filename = m.group(1)
+
+
+async def _deliver(request, job_id, filename):
+    """The name to serve for a freshly derived clip file: the file itself, or
+    on the free plan its ``wm_`` copy (``main.mark_delivery``).
+
+    Decided from the caller's plan right now, not from the job's flag: the
+    flag is lost on a restart/restore, and a user who upgraded mid-session
+    must get clean files from their next edit on. Self-host never marks."""
+    if not BILLING_ENABLED:
+        return filename
+    user = await _user_from_request(request)
+    if user is None or user.plan != "free":
+        return filename
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    # Only jobs the pipeline rendered under this scheme (marker file). A job
+    # from before it has the mark burned into its canonical, so every
+    # derivative already carries one and a copy would stack a second.
+    if not watermarked.job_is_marked(output_dir):
+        return filename
+    import main as _main
+    marked = await asyncio.get_event_loop().run_in_executor(
+        None, _main.mark_delivery, os.path.join(output_dir, filename))
+    return os.path.basename(marked)
+
+
+def _media_guard(path: str) -> bool:
+    """``/videos`` allowlist: deliverable types only (media_auth), and on a
+    job rendered for the free plan never the clean twin of a served clip.
+    The twins exist so an upgrade can re-point at them, not for stripping
+    ``wm_`` off a URL."""
+    if not media_auth.is_servable(path):
+        return False
+    job_id, _, filename = path.replace("\\", "/").strip("/").partition("/")
+    if not filename or not watermarked.is_clean_deliverable(filename):
+        return True
+    return not watermarked.job_is_marked(os.path.join(OUTPUT_DIR, job_id))
+
+
+def _unmark_local_job(job_id, clip_index, clean_filename):
+    """After an upgrade: point the working copy of a clip at its clean twin.
+
+    Called by cloud/videos.unmark_user_library for every clip it re-pointed
+    in R2, so a dashboard still open on the job polls clean URLs from the
+    in-memory result and a later restore/recovery reads them from the
+    metadata. The marked file and the marker go, so the /videos guard opens
+    the twins again."""
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    url = f"/videos/{job_id}/{clean_filename}"
+    job = jobs.get(job_id)
+    mem_clips = ((job or {}).get('result') or {}).get('clips') or []
+    if clip_index < len(mem_clips):
+        mem_clips[clip_index]['video_url'] = url
+    ready = (job or {}).get('ready_files')
+    if isinstance(ready, dict) and clip_index in ready:
+        ready[clip_index] = clean_filename
+    for meta_path in glob.glob(os.path.join(job_dir, "*_metadata.json")):
+        try:
+            with open(meta_path, 'r') as f:
+                data = json.load(f)
+            shorts = data.get('shorts', [])
+            if clip_index < len(shorts):
+                shorts[clip_index]['video_url'] = url
+                with open(meta_path, 'w') as f:
+                    json.dump(data, f, indent=4)
+        except Exception as e:
+            print(f"⚠️ Could not unmark metadata of {job_id}: {e}")
+    watermarked.unmark_job(job_dir)
+    marked_path = os.path.join(job_dir, watermarked.marked_name(clean_filename))
+    if os.path.exists(marked_path):
+        try:
+            os.remove(marked_path)
+        except OSError:
+            pass
 
 
 def _reapply_captions(job_id, clip_index, video_path):
@@ -2182,6 +2278,10 @@ async def lifespan(app: FastAPI):
         # Account erasure lives in cloud/, which can't import app.py; hand it the
         # one thing only this module can do — wipe the local working files.
         cloud.account.register_local_purge(_purge_local_jobs_for_user)
+        # Same arrangement for the watermark: when a user upgrades, cloud/videos
+        # re-points their clips at the clean twins in R2 and hands us each
+        # one so the working copy (and an open dashboard) follows.
+        cloud.videos.register_local_unmark(_unmark_local_job)
         # Autopilot: watch connected YouTube channels for new videos. Paused
         # while this instance drains so only the new container submits jobs.
         cloud.autopilot.start(app, is_active=lambda: not _draining)
@@ -2232,7 +2332,7 @@ from restoring_static import RestoringStaticFiles
 import media_auth
 app.mount("/videos", RestoringStaticFiles(
     directory=OUTPUT_DIR,
-    guard=media_auth.is_servable,
+    guard=_media_guard,
     restorer=lambda job_id: _restore_for_public_path(job_id)), name="videos")
 
 # Mount static files for serving thumbnails
@@ -3537,6 +3637,9 @@ async def _restore_job_files(job_id: str, proj, user_id: str) -> bool:
                 clip['video_url'] = (
                     f"/videos/{job_id}/"
                     f"{_canonical_clip_file(job_dir, base_name, i)}")
+        if any(watermarked.is_marked(c.get("server_file") or "")
+               for c in (proj.state or {}).get("clips", [])):
+            watermarked.mark_job(job_dir)
         jobs[job_id] = {
             'status': 'completed',
             'logs': _TimedLog(["♻️ Project restored from your library."]),
@@ -3752,6 +3855,7 @@ async def edit_clip(
             if recap:
                 edited_filename = os.path.basename(recap)
 
+        edited_filename = await _deliver(request, req.job_id, edited_filename)
         new_video_url = f"/videos/{req.job_id}/{edited_filename}"
 
         # Persist the new current file like /api/subtitle does: in-memory job
@@ -3970,7 +4074,8 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
         "canonical_range": canonical_range,
         "duration": total,
         "current_file": current_file,
-        "has_captions": bool(re.match(r'^subtitled_\d+_', current_file)),
+        "has_captions": bool(re.match(r'^subtitled_\d+_',
+                                      watermarked.clean_name(current_file))),
         "words": words_out,
         "source": {
             "available": bool(source_path),
@@ -4133,13 +4238,13 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
             input_path=source_path, segments=segments,
             output_dir=output_dir, clean_name=clean_name,
             reframe=True, output_format=data.get('output_format', 'auto'),
-            watermark=bool(job.get('watermark')),
             force_strategy=force_strategy,
             captions_transcript=v_transcript)
 
     try:
         loop = asyncio.get_event_loop()
         served_name, _clean_recut_name = await loop.run_in_executor(None, run_recut)
+        served_name = await _deliver(request, req.job_id, served_name)
 
         new_video_url = f"/videos/{req.job_id}/{served_name}"
         new_recipe = {"v": 1, "segments": segments,
@@ -4493,7 +4598,6 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
             input_path=source_path, segments=segments,
             output_dir=output_dir, clean_name=clean_name,
             reframe=True, output_format=data.get('output_format', 'auto'),
-            watermark=bool(job.get('watermark')),
             force_strategy=force_strategy,
             crop_overrides=overrides,
             captions_transcript=v_transcript)
@@ -4501,6 +4605,7 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
     try:
         loop = asyncio.get_event_loop()
         served_name, _clean = await loop.run_in_executor(None, run)
+        served_name = await _deliver(request, req.job_id, served_name)
 
         new_video_url = f"/videos/{req.job_id}/{served_name}"
         new_recipe = {"v": 1, "segments": segments,
@@ -4894,6 +4999,8 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
     if reservation_id:
         await _metering.commit_reservation(reservation_id)
 
+    output_filename = await _deliver(request, req.job_id, output_filename)
+
     # 3. Update Result and Metadata
     # Update InMemory Jobs
     if req.clip_index < len(job['result']['clips']):
@@ -4960,16 +5067,15 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
            f"_clip_{req.clip_index + 1}.mp4")
 
     # Same walk-back the burn path uses, so this undoes any number of restyles.
-    while True:
-        m = re.match(r'^subtitled_\d+_(.+)$', filename)
-        if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
-            break
-        filename = m.group(1)
+    filename = _strip_burned_captions(output_dir, filename)
 
     if not os.path.exists(os.path.join(output_dir, filename)):
         raise HTTPException(status_code=404,
                             detail="The original clip is no longer available.")
 
+    # Free plan: the un-captioned file is served through its wm_ copy, which
+    # is reused when the clip shipped that way (no encode).
+    filename = await _deliver(request, req.job_id, filename)
     new_url = f"/videos/{req.job_id}/{filename}"
     if req.clip_index < len(job.get('result', {}).get('clips', [])):
         job['result']['clips'][req.clip_index]['video_url'] = new_url
@@ -5090,6 +5196,8 @@ async def add_hook(req: HookRequest, request: Request):
             None, _reapply_captions, req.job_id, req.clip_index, output_path)
         if recap:
             output_filename = os.path.basename(recap)
+
+    output_filename = await _deliver(request, req.job_id, output_filename)
 
     # Record the burned hook so the editor knows what the clip carries (the
     # auto-hook pipeline writes the same key).
@@ -5215,6 +5323,8 @@ async def translate_clip(
     from ffmpeg_utils import mark_ai_generated
     await loop.run_in_executor(
         None, lambda: mark_ai_generated(output_path, "AI voice dubbing"))
+
+    output_filename = await _deliver(request, req.job_id, output_filename)
 
     # Update InMemory Jobs
     if req.clip_index < len(job['result']['clips']):

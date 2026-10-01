@@ -502,6 +502,22 @@ def _sub_period(sub_obj: dict):
     return start, end
 
 
+LIVE_STATUSES = ("active", "trialing")
+
+
+def became_live(prev_status, now_status) -> bool:
+    """The transition that turns a free account into a paid one."""
+    return now_status in LIVE_STATUSES and prev_status not in LIVE_STATUSES
+
+
+async def _unmark_after_upgrade(user_id):
+    try:
+        from . import videos
+        await videos.unmark_user_library(user_id)
+    except Exception as e:
+        print(f"⚠️  Could not unmark the library of {user_id} after upgrade: {e}")
+
+
 async def _upsert_subscription(sub_obj: dict, event_created: datetime):
     price_id = _sub_price_id(sub_obj)
     info = plan_info_for_price(price_id)
@@ -573,6 +589,11 @@ async def _upsert_subscription(sub_obj: dict, event_created: datetime):
     # by the 'Payment received' alert on invoice.paid, which carries the
     # amount; a second message here would just be noise.
     now_status = sub_obj["status"]
+    if became_live(prev_status, now_status):
+        # The clips this user already made on the free plan lose their
+        # watermark now (cloud/videos): the upgrade modal promised exactly
+        # that. Fire-and-forget: Stripe must get its 200 whatever R2 does.
+        asyncio.create_task(_unmark_after_upgrade(user_id))
     label = new_subscriber_label(now_status) if is_new_sub else None
     if label:
         from .alerts import send_admin_alert

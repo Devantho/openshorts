@@ -120,7 +120,8 @@ export default function TopUpModal({ onClose, required, remaining, partialMinute
       <p className="text-muted text-sm mb-5">
         {isUpsell
           ? <>Every clip comes out <b className="text-ink font-medium">ready to post</b> and stays in your
-              library for good. On the free plan they carry a watermark and are deleted after 7 days.</>
+              library for good. On the free plan they carry a watermark and are deleted after 7 days;
+              upgrade now and the clips you already made <b className="text-ink font-medium">lose the mark on the spot</b>.</>
           : blockedByLength
             ? <>This video is <b className="text-ink font-medium">{required} min</b> long and you have{' '}
                 <b className="text-ink font-medium">{remainingShown} min</b> this month. Pick a plan and the
