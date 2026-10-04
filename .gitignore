@@ -49,3 +49,6 @@ skills-lock.json
 
 # Instrucciones locales con datos de infra (repo público)
 CLAUDE.local.md
+
+# Panel data: server-side API keys, password hash, session secret
+data/

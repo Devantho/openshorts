@@ -1,9 +1,8 @@
 import React, { useState, useMemo } from 'react';
-import { Loader2, Calendar, CheckCircle, AlertCircle, Video, Instagram, Youtube, ChevronLeft, ChevronRight, Circle, ExternalLink } from 'lucide-react';
+import { Loader2, Calendar, CheckCircle, AlertCircle, ChevronLeft, ChevronRight, Circle, ExternalLink } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import Modal from './ui/Modal';
-import SegmentedControl from './ui/SegmentedControl';
-import TikTokDraftNotice from './TikTokDraftNotice';
+import PostizChannelPicker from './PostizChannelPicker';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -40,11 +39,21 @@ const TIMEZONES = [
     { value: 'Pacific/Auckland', label: '(GMT+12:00) Auckland' },
 ];
 
-const PLATFORM_OPTIONS = [
-    { value: 'tiktok', label: 'TikTok', icon: <Video size={16} /> },
-    { value: 'instagram', label: 'Instagram', icon: <Instagram size={16} /> },
-    { value: 'youtube', label: 'YouTube', icon: <Youtube size={16} /> },
-];
+// Wall-clock time in an IANA zone -> UTC Date (Postiz takes UTC ISO dates).
+function zonedTimeToUtc(y, m, d, hh, mm, timeZone) {
+    const wall = Date.UTC(y, m, d, hh, mm);
+    const offsetAt = (instant) => {
+        const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+            timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+        }).formatToParts(new Date(instant)).map((p) => [p.type, p.value]));
+        const asUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
+        return asUtc - instant;
+    };
+    let guess = wall - offsetAt(wall);
+    guess = wall - offsetAt(guess); // second pass settles DST edges
+    return new Date(guess);
+}
 
 function getDayLabel(date) {
     const today = new Date();
@@ -73,14 +82,10 @@ function detectTimezone() {
     }
 }
 
-export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploadPostKey, uploadUserId, isManaged }) {
+export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, channels, channelsError, postizAppUrl }) {
     const [time, setTime] = useState('12:00');
     const [timezone, setTimezone] = useState(detectTimezone);
-    const [platforms, setPlatforms] = useState({
-        tiktok: true,
-        instagram: true,
-        youtube: true
-    });
+    const [selected, setSelected] = useState([]);
     const [startOffset, setStartOffset] = useState(1);
 
     const schedule = useMemo(() => {
@@ -104,20 +109,19 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
             setScheduling(false);
             setDone(false);
             setProgress({ current: 0, total: 0, results: [] });
+            setSelected((channels || []).filter((c) => !c.disabled).map((c) => c.id));
         }
         prevOpen.current = isOpen;
-    }, [isOpen]);
+    }, [isOpen, channels]);
 
     if (!isOpen) return null;
 
-    const selectedPlatforms = Object.keys(platforms).filter(k => platforms[k]);
-
-    // Managed (cloud plan/trial) users post with the server-side key — no BYOK needed
-    const canPost = isManaged || (uploadPostKey && uploadUserId);
+    // channels === null means Postiz is not configured on the server.
+    const canPost = Array.isArray(channels) && channels.some((c) => !c.disabled);
 
     const handleScheduleAll = async () => {
         if (!canPost) return;
-        if (selectedPlatforms.length === 0) return;
+        if (selected.length === 0) return;
 
         setScheduling(true);
         setDone(false);
@@ -128,25 +132,22 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
         for (let i = 0; i < schedule.length; i++) {
             const { clip, index, date } = schedule[i];
 
-            // Build local datetime string: "2026-04-06T12:00:00"
-            // Upload-Post accepts this + timezone IANA parameter
-            const pad = (n) => String(n).padStart(2, '0');
-            const scheduledDate = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${time}:00`;
+            const [hh, mm] = time.split(':').map(Number);
+            const when = zonedTimeToUtc(date.getFullYear(), date.getMonth(), date.getDate(), hh, mm, timezone);
 
             const payload = {
+                kind: 'clip',
                 job_id: jobId,
                 clip_index: index,
-                api_key: uploadPostKey,
-                user_id: uploadUserId,
-                platforms: selectedPlatforms,
+                integration_ids: selected,
                 title: clip.video_title_for_youtube_short || 'Viral Short',
-                description: clip.video_description_for_instagram || clip.video_description_for_tiktok || '',
-                scheduled_date: scheduledDate,
-                timezone
+                description: clip.video_description_for_tiktok || clip.video_description_for_instagram || '',
+                mode: 'schedule',
+                scheduled_date: when.toISOString(),
             };
 
             try {
-                const res = await apiFetch('/api/social/post', {
+                const res = await apiFetch('/api/postiz/post', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
@@ -154,7 +155,9 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
 
                 if (!res.ok) {
                     const errText = await res.text();
-                    throw new Error(errText);
+                    let detail = errText;
+                    try { detail = JSON.parse(errText).detail || errText; } catch { /* not JSON */ }
+                    throw new Error(detail);
                 }
 
                 results.push({ index: i, success: true });
@@ -184,7 +187,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
             {!done ? (
                 <button
                     onClick={handleScheduleAll}
-                    disabled={scheduling || !canPost || selectedPlatforms.length === 0}
+                    disabled={scheduling || !canPost || selected.length === 0}
                     className="btn-primary flex-1"
                 >
                     {scheduling ? (
@@ -199,17 +202,17 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                         </>
                     )}
                 </button>
-            ) : (
+            ) : postizAppUrl ? (
                 <a
-                    href="https://app.upload-post.com/calendar"
+                    href={postizAppUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="btn-primary flex-1 no-underline"
                 >
                     <ExternalLink size={16} />
-                    view calendar
+                    open postiz
                 </a>
-            )}
+            ) : null}
         </div>
     );
 
@@ -227,7 +230,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
             {!canPost && (
                 <div className="mb-4 p-3 bg-warn/10 text-warn text-xs rounded-input flex items-start gap-2">
                     <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                    <div>Set your Upload-Post API key in Settings first.</div>
+                    <div>{channels === null ? 'Configure Postiz in Settings first.' : 'No Postiz channel available.'}</div>
                 </div>
             )}
 
@@ -321,26 +324,11 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                 ))}
             </div>
 
-            {/* Platforms */}
+            {/* Channels */}
             <div className="mb-5">
-                <label className="eyebrow block mb-2">platforms</label>
-                <SegmentedControl
-                    multi
-                    options={PLATFORM_OPTIONS.map(opt => ({ ...opt, disabled: scheduling }))}
-                    value={selectedPlatforms}
-                    onChange={(arr) => setPlatforms({
-                        tiktok: arr.includes('tiktok'),
-                        instagram: arr.includes('instagram'),
-                        youtube: arr.includes('youtube')
-                    })}
-                />
+                <label className="eyebrow block mb-2">postiz channels</label>
+                <PostizChannelPicker channels={channels} error={channelsError} value={selected} onChange={scheduling ? () => {} : setSelected} />
             </div>
-
-            {/* A whole week of tiktok posts is a whole week of silent drafts:
-                this modal writes no captions of its own either (it sends the
-                clip's generated title/description), and tiktok keeps none of
-                them on a draft. Say it before the button, not after. */}
-            {platforms.tiktok && !scheduling && !done && <TikTokDraftNotice />}
 
             {/* Progress bar */}
             {(scheduling || done) && (

@@ -6,6 +6,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 OpenShorts is an AI-powered vertical video generator that transforms long YouTube videos or local uploads into viral-ready short clips (9:16 format) for TikTok, Instagram Reels, and YouTube Shorts. Uses Google Gemini 3.1 Flash-Lite (`gemini-3.1-flash-lite`, overridable with `GEMINI_MODEL`) for viral moment detection and title generation.
 
+## This fork (BomShort)
+
+Private self-hosted panel; the upstream marketing site (landing, SEO pages,
+free tools, pricing, analytics) is gone and the dashboard opens on the panel.
+Cloud-mode code (`cloud/`, `BILLING_ENABLED`) is still in the tree but unused.
+
+- **Auth** (`panel_auth.py`): one password guards every route except
+  `/health*` and `/api/auth/*`. HttpOnly cookie `bs_session` (HMAC over
+  expiry + a fingerprint of the password, so a password change logs everyone
+  out); agents use `Authorization: Bearer $APP_API_TOKEN`. The panel and the
+  API must be same-origin (nginx.conf / the Vite proxy forward every backend
+  path). CORS is closed unless `CORS_ORIGINS` is set.
+- **Keys** (`settings_store.py`): stored in `DATA_DIR/settings.json`, never
+  returned to the browser. `AuthMiddleware` strips client `X-Gemini-Key` /
+  `X-ElevenLabs-Key` / `X-Fal-Key` and injects the stored ones, so endpoints
+  that read those headers are unchanged. Env vars are the fallback.
+- **Postiz** (`postiz.py`): `/api/postiz/integrations`, `/api/postiz/post`
+  (upload once, one post group for all selected channels; `now` / `schedule`
+  / `draft`), `/api/thumbnail/publish` (YouTube + custom thumbnail) and
+  `autopost_job`, called from `run_job_wrapper` after a job completes.
+  Upload-Post endpoints remain in app.py but nothing in the panel calls them.
+- Tests: `tests/test_panel_auth.py`; `tests/conftest.py` turns the middleware
+  into a pass-through for the older endpoint tests.
+
 ## Development Commands
 
 ### Local Development (Docker)
@@ -43,7 +67,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 8. **Hook Overlay** - Text overlays with styled fonts
 9. **Voice Dubbing** - Optional ElevenLabs AI translation (30+ languages)
 10. **S3 Backup** - Silent background upload
-11. **Social Distribution** - Upload-Post API (async upload)
+11. **Social Distribution** - Postiz public API (manual posts + auto-post)
 
 ### Key Files
 | File | Purpose |
@@ -57,58 +81,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 | `translate.py` | ElevenLabs dubbing API for AI voice translation |
 | `dashboard/src/App.jsx` | Main React component with state management |
 | `dashboard/src/components/TranslateModal.jsx` | Voice dubbing UI with language selection |
-| `dashboard/vite-plugin-seo.js` | Build-time SEO surface: injects crawler-visible homepage content, emits static pages, sitemap.xml and llms.txt |
-| `dashboard/seo/data.js` | Single source of truth for pricing, pipeline and competitor facts used by every generated page |
-
-### SEO / AI-crawler surface
-
-The dashboard is a client-rendered SPA with hash routing, so the HTML served for
-`/` used to contain an empty `<div id="root">`. Googlebot renders JavaScript and
-saw the real page; GPTBot, ClaudeBot and PerplexityBot do not and measured the
-homepage as zero characters of text. `vite-plugin-seo.js` fixes that at build time:
-
-- Injects the content of `seo/landing-fallback.js` into `#root`. React's
-  `createRoot().render()` replaces it on mount, so users get the app and
-  non-executing clients get the copy. **Keep it in sync with `Landing.jsx`.**
-- Emits the standalone pages (the `/alternatives` cluster, the clip-generator,
-  open-source, use-case and automation pages, and `/mcp`; the full list is
-  `buildPages()` in `seo/pages.js`) as flat `.html` files.
-  nginx resolves the clean URL through `try_files $uri $uri.html`; serving them as
-  directories instead makes nginx 301 to a trailing slash and every canonical
-  would then point at a redirect.
-- Generates `sitemap.xml` and `llms.txt` from the same page list, so they cannot
-  drift. Do not add a static `public/sitemap.xml` back.
-
-When editing pricing anywhere, edit `seo/data.js` too. Nothing on the site should
-say "OpenShorts is free" without naming the Cloud price in the same breath: both
-are true of different editions and quoting only the first one is what makes AI
-answers describe the paid product as free.
-
-### Free tools (/tools) and SEO attribution
-
-- `free_tools.py` (router always mounted): `GET /api/tools/youtube-transcript`
-  reads the captions a video **already has** on YouTube via yt-dlp (never the
-  GPU, never media). Routes: the `STATIC_PROXY_URLS` only (anonymous, then the
-  cookies), direct when there are none; **never** the per-GB `PROXY_URL`. A
-  static that answers with zero formats and zero captions is a degraded route,
-  not a "no captions" verdict (seen on one of the three statics, 23-sep-2026).
-  `POST /api/tools/youtube-metadata` = one Gemini text call (tags / titles /
-  description) with the managed key. Per-IP windows + global daily cap per tool,
-  24 h cache (also for "no captions"/"unavailable").
-- Pages: `seo/tools.js` (hub + 3 tools) and `seo/autopilot-pages.js`
-  (`/auto-clip`, `/youtube-automation`). A tool page carries `tool: {entry, html}`:
-  the form is in the static HTML, the behaviour is a Vite entry in
-  `dashboard/tools/*.js` (`vite.config.js` rollupOptions.input) that
-  `vite-plugin-seo.js` looks up by name in the bundle. The 9:16 converter runs
-  in the browser with mediabunny/WebCodecs (no upload).
-- Attribution: `seo/render.js` writes the same first-touch `os_attrib` key the
-  app writes, from the static page the visit started on. Before, every signup
-  was credited to "/" (7,481/7,481 rows, 30 days to 23-sep-2026). Signup,
-  CheckoutStarted and Subscribed carry `landing_path`/`referrer_host`/utm as
-  OpenPanel props (`lib/analytics.js`).
-- Apex→www: 301 comes from the front app's **stored Coolify custom labels**
-  (`redirectregex.permanent=true`, patched 23-sep-2026). The nginx 301 block
-  below never sees the apex while that Traefik middleware exists.
+| `panel_auth.py` / `settings_store.py` / `postiz.py` | Password gate, server-side keys, Postiz publishing |
 
 ### Cómo se elige el layout
 
@@ -362,9 +335,6 @@ the frame trick over from the layout picker. Gemini-only either way: a
 text-only `LLM_BASE_URL` server cannot see footage, and with no
 `GEMINI_API_KEY` the function logs one line and returns None, which fails
 the job outright.
-
-The public `/gta-5-clips` page states these thresholds and this ceiling to
-users; if the behaviour changes, change `dashboard/seo/pages.js` too.
 
 ### Local LLM for the moment picker (`llm_backend.py`)
 

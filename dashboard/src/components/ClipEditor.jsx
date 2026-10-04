@@ -5,8 +5,7 @@ import {
     PanelLeft, PanelLeftClose, Film,
 } from 'lucide-react';
 import { getApiUrl } from '../config';
-import { apiFetch, apiJson, QuotaError } from '../lib/api';
-import { useAuth } from '../contexts/AuthContext';
+import { apiFetch, apiJson } from '../lib/api';
 
 // Full-screen clip editor: shows WHICH source segments a clip was cut from,
 // lets the user trim/extend/split/reorder them (word-snapped), and re-renders
@@ -96,7 +95,6 @@ function editorReducer(state, action) {
 }
 
 export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRerendered }) {
-    const { refreshMe } = useAuth();
     const [edl, setEdl] = useState(null);
     const [loadError, setLoadError] = useState(null);
     const [state, dispatch] = useReducer(editorReducer, { segments: [], selected: 0, past: [], future: [], pendingBase: null });
@@ -868,14 +866,8 @@ export default function ClipEditor({ jobId, clipIndex, clipTitle, onClose, onRer
             dispatch({ type: 'init', segments: data.recipe.segments.map((s) => ({ ...s })) });
             setPreviewUrl(`${getApiUrl(data.new_video_url)}?t=${Date.now()}`);
             onRerendered?.(clipIndex, data);
-            refreshMe();
         } catch (e) {
-            if (e instanceof QuotaError) {
-                refreshMe();
-                setRenderError(`not enough minutes left (needs ${e.minutesRequired ?? '?'}, ${e.minutesRemaining ?? 0} remaining)`);
-            } else {
-                setRenderError(e.message || 're-render failed');
-            }
+            setRenderError(e.message || 're-render failed');
         } finally {
             setRendering(false);
         }

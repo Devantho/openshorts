@@ -1,9 +1,17 @@
-name: CI
+name: CI/CD
 
+# Tests run on GitHub-hosted runners (pull requests included). Deployment
+# runs on the self-hosted runner, only for pushes to main / manual runs, and
+# only once both test jobs are green. A pull request never reaches the
+# self-hosted runner from this file.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   backend-tests:
@@ -27,7 +35,7 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v
 
-  frontend-build:
+  frontend:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -41,5 +49,66 @@ jobs:
           cache-dependency-path: dashboard/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Lint
+        run: npm run lint
       - name: Build
         run: npm run build
+
+  deploy:
+    needs: [backend-tests, frontend]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux]
+    # One deploy at a time; a newer push waits instead of killing a build.
+    concurrency:
+      group: deploy-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      COMPOSE: docker compose -f docker-compose.prod.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      # .env is not versioned and actions/checkout wipes untracked files, so it
+      # is rebuilt from the BOMSHORT_ENV secret on every run. The secret goes
+      # through env: (not ${{ }} in the script) so quotes and $ survive, and
+      # tr -d '\r' neutralises a .env saved with CRLF line endings.
+      - name: Write .env from secret
+        env:
+          BOMSHORT_ENV: ${{ secrets.BOMSHORT_ENV }}
+        run: |
+          if [ -z "$BOMSHORT_ENV" ]; then
+            echo "::error::Secret BOMSHORT_ENV is missing (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+          printf '%s\n' "$BOMSHORT_ENV" | tr -d '\r' > .env
+          chmod 600 .env
+          if ! grep -qE '^APP_PASSWORD=.+' .env; then
+            echo "::warning::APP_PASSWORD is not set in BOMSHORT_ENV: a password will be generated and printed once in the backend logs."
+          fi
+
+      - name: Build images
+        run: $COMPOSE build --pull
+
+      - name: Start / update services
+        run: $COMPOSE up -d --remove-orphans
+
+      # The panel answers through nginx -> backend; the backend can take a
+      # while on first boot (model downloads), so give it a few minutes.
+      - name: Health check
+        run: |
+          PORT=$(grep -E '^PANEL_PORT=' .env | tail -n1 | cut -d= -f2- | tr -d '"'"'"' ')
+          PORT=${PORT:-8080}
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:${PORT}/api/auth/status" >/dev/null; then
+              echo "Panel is up on port ${PORT}"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Panel did not answer on port ${PORT} after 5 minutes"
+          $COMPOSE ps
+          $COMPOSE logs --tail=100 backend frontend
+          exit 1
+
+      - name: Clean dangling images
+        if: always()
+        run: docker image prune -f

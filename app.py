@@ -36,6 +36,11 @@ import media_auth
 
 load_dotenv()
 
+# Self-host panel: password auth + server-side key storage + Postiz publishing.
+import settings_store
+import panel_auth
+import postiz
+
 # Constants
 UPLOAD_DIR = "uploads"
 OUTPUT_DIR = "output"
@@ -180,10 +185,12 @@ async def resolve_gemini(request: Request) -> Optional[str]:
         if managed_keys.has_active_entitlement(user):
             return managed_keys.gemini_key()
         return None
+    # The auth middleware replaces any client-sent header with the key stored
+    # server-side; settings_store also falls back to the GEMINI_API_KEY env.
     header = request.headers.get("X-Gemini-Key")
     if header:
         return header
-    return os.environ.get("GEMINI_API_KEY")
+    return settings_store.get("gemini_api_key")
 
 
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
@@ -1353,6 +1360,8 @@ def _resume_interrupted_jobs() -> set:
                 env["GEMINI_API_KEY"] = managed_keys.gemini_key()
             except Exception:
                 pass
+        elif not BILLING_ENABLED and settings_store.get("gemini_api_key"):
+            env["GEMINI_API_KEY"] = settings_store.get("gemini_api_key")
         if m.get("watermark"):
             env["WATERMARK"] = "1"
         else:
@@ -1756,6 +1765,8 @@ async def run_job_wrapper(job_id):
         # Autopilot bookkeeping + autopublish (before the generic clips-ready
         # email, which it replaces for its own jobs).
         await _autopilot_job_finished(job_id, job)
+        # Self-host: publish the best clips through Postiz when enabled.
+        await _postiz_autopost(job_id, job)
         # Fire the caller's webhook (after archive, so durable links exist).
         await _notify_job_webhook(job_id)
         # Operational alerting for managed jobs (proxy out of credits / failures).
@@ -2305,16 +2316,22 @@ if BILLING_ENABLED:
 import mcp_server as _mcp_server
 app.include_router(_mcp_server.router)
 
-# Free public tools behind the /tools SEO pages: YouTube transcript (existing
-# captions only, never the GPU) and the title/description/tag generator.
-import free_tools as _free_tools
-app.include_router(_free_tools.router)
+# Postiz publishing (manual posts + auto-post after each job).
+app.include_router(postiz.router)
 
-# Enable CORS for frontend. Cloud mode locks this down to the configured origins;
-# self-host keeps the permissive wildcard it has always used.
+# Password protection for every route except /health* and the login endpoints.
+# Added before CORS so CORS stays the outermost layer.
+if not BILLING_ENABLED:
+    panel_auth.ensure_initialised()
+    app.add_middleware(panel_auth.AuthMiddleware)
+
+# CORS. The panel is served same-origin (nginx proxies the API), so self-host
+# allows no cross-origin caller unless CORS_ORIGINS lists one: a wildcard with
+# credentials would let any website drive the panel with the session cookie.
+_SELFHOST_CORS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cloud.settings.allowed_origins if BILLING_ENABLED else ["*"],
+    allow_origins=cloud.settings.allowed_origins if BILLING_ENABLED else _SELFHOST_CORS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2644,7 +2661,142 @@ async def get_config():
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
+        "postizConfigured": bool(settings_store.get("postiz_url") and settings_store.get("postiz_api_key")),
+        "keys": {k: v["set"] for k, v in settings_store.public_view()["keys"].items()},
     }
+
+
+# ---- Panel authentication (self-host) -------------------------------------------
+
+class LoginRequest(BaseModel):
+    password: str
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _set_session_cookie(resp, request: Request):
+    resp.set_cookie(
+        panel_auth.COOKIE_NAME, panel_auth.issue_token(),
+        max_age=panel_auth.SESSION_TTL_SECONDS, httponly=True, samesite="lax", path="/",
+        secure=panel_auth.cookie_secure({k.lower(): v for k, v in request.headers.items()}, request.url.scheme),
+    )
+    return resp
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    token = panel_auth.token_from_headers({k.lower(): v for k, v in request.headers.items()})
+    return {
+        "authenticated": panel_auth.verify_token(token),
+        "passwordFromEnv": panel_auth.env_password_set(),
+    }
+
+
+@app.post("/api/auth/login")
+async def auth_login(req: LoginRequest, request: Request):
+    ip = _client_ip(request)
+    if not panel_auth.login_allowed(ip):
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again in a few minutes.")
+    # scrypt is deliberately slow: keep it off the event loop.
+    ok = await asyncio.to_thread(panel_auth.check_password, req.password)
+    if not ok:
+        panel_auth.record_failure(ip)
+        await asyncio.sleep(0.5)
+        raise HTTPException(status_code=401, detail="Wrong password.")
+    panel_auth.clear_failures(ip)
+    return _set_session_cookie(JSONResponse({"authenticated": True}), request)
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    resp = JSONResponse({"authenticated": False})
+    resp.delete_cookie(panel_auth.COOKIE_NAME, path="/")
+    return resp
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/api/auth/password")
+async def auth_change_password(req: ChangePasswordRequest, request: Request):
+    try:
+        await asyncio.to_thread(panel_auth.change_password, req.current_password, req.new_password)
+    except PermissionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # The fingerprint changed, so every session is void: hand this one a new cookie.
+    return _set_session_cookie(JSONResponse({"success": True}), request)
+
+
+# ---- Server-side settings (API keys, Postiz, auto-post) -------------------------
+
+@app.get("/api/settings")
+async def get_settings():
+    return settings_store.public_view()
+
+
+@app.put("/api/settings")
+async def put_settings(request: Request):
+    try:
+        changes = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    if not isinstance(changes, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    try:
+        return await asyncio.to_thread(settings_store.update, changes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---- Postiz wiring ---------------------------------------------------------------
+
+def _postiz_media(kind: str, job_id: str, clip_index: Optional[int]):
+    """Map a clip reference to (file on disk, default title, default description)."""
+    if kind == "saas":
+        job = saas_jobs.get(job_id)
+        result = (job or {}).get("result") or {}
+        if not result.get("video_url"):
+            raise HTTPException(status_code=404, detail="AI Short not found")
+        path = _safe_under(OUTPUT_DIR, result["video_url"].replace("/videos/", "", 1))
+        script = result.get("script") or {}
+        title = script.get("title") or "AI Short"
+        description = script.get("caption") or script.get("full_narration") or ""
+    else:
+        job = jobs.get(job_id)
+        clips = ((job or {}).get("result") or {}).get("clips") or []
+        if clip_index is None or not (0 <= clip_index < len(clips)):
+            raise HTTPException(status_code=404, detail="Clip not found")
+        clip = clips[clip_index]
+        filename = (clip.get("video_url") or "").split("/")[-1]
+        path = _safe_under(os.path.join(OUTPUT_DIR, job_id), filename) if filename else None
+        title = clip.get("video_title_for_youtube_short") or clip.get("title") or "Short"
+        description = (clip.get("video_description_for_tiktok") or clip.get("video_description_for_instagram")
+                       or clip.get("viral_hook_text") or "")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Video file not found (expired?)")
+    return path, title, description
+
+
+postiz.configure(resolve_media=_postiz_media)
+
+
+async def _postiz_autopost(job_id, job):
+    if BILLING_ENABLED or not job or job.get('status') != 'completed':
+        return
+    clips = (job.get('result') or {}).get('clips') or []
+    try:
+        summary = await postiz.autopost_job(job_id, clips, lambda line: job.setdefault('logs', []).append(line))
+    except Exception as e:
+        print(f"⚠️ Auto-post error for {job_id}: {e}")
+        return
+    if summary is not None:
+        job['autopost'] = summary
 
 async def _probe_youtube_quality(url: str) -> dict:
     """Run quality_probe.py in a worker thread; {} on any failure (fail-open)."""
@@ -6222,20 +6374,14 @@ async def thumbnail_publish(
     title: str = Form(...),
     description: str = Form(...),
     thumbnail_url: str = Form(...),
-    api_key: Optional[str] = Form(None),   # BYOK; ignored for managed users
-    user_id: Optional[str] = Form(None),   # BYOK profile; ignored for managed users
+    integration_ids: str = Form(...),       # comma-separated Postiz channel ids
+    mode: str = Form("now"),                # now | schedule | draft
+    scheduled_date: Optional[str] = Form(None),
 ):
-    """Kick off a background upload to YouTube via Upload-Post and return immediately."""
+    """Kick off a background publish of the Studio video (with its custom
+    thumbnail) through Postiz and return immediately; poll the status route."""
     if session_id not in thumbnail_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-
-    # Managed users: server key + forced own profile; body fields ignored.
-    upload_key, forced_profile = await resolve_upload_post(request, api_key)
-    if not upload_key:
-        raise HTTPException(status_code=400, detail="Missing Upload-Post API key")
-    post_user = forced_profile or user_id
-    if not post_user:
-        raise HTTPException(status_code=400, detail="Missing Upload-Post user profile")
 
     session = thumbnail_sessions[session_id]
     await _assert_job_owner(request, session)
@@ -6245,7 +6391,7 @@ async def thumbnail_publish(
 
     # Resolve thumbnail path from URL — sanitize against path traversal so a
     # crafted thumbnail_url (e.g. "thumbnails/../../.env") can't read server
-    # files and exfiltrate them via the Upload-Post multipart body.
+    # files and exfiltrate them via the upload.
     thumb_relative = thumbnail_url.lstrip("/")
     if thumb_relative.startswith("thumbnails/"):
         thumb_path = _safe_under(OUTPUT_DIR, thumb_relative)
@@ -6257,51 +6403,30 @@ async def thumbnail_publish(
     if not os.path.exists(thumb_path):
         raise HTTPException(status_code=404, detail="Thumbnail file not found")
 
+    ids = [i.strip() for i in integration_ids.split(",") if i.strip()]
+    try:
+        integrations = await postiz.pick_integrations(ids)
+        date = postiz.parse_date(scheduled_date)
+    except postiz.PostizError as e:
+        raise HTTPException(status_code=e.status, detail=e.message)
+    if mode == "schedule" and date is None:
+        raise HTTPException(status_code=400, detail="A scheduled post needs scheduled_date.")
+
     # Generate a unique ID for this publish job so the frontend can poll
     publish_id = str(uuid.uuid4())
     publish_jobs[publish_id] = {"status": "uploading", "result": None, "error": None,
                                 "user_id": session.get("user_id")}
 
-    def do_upload():
-        """Runs in a thread via BackgroundTasks — does the actual multipart upload."""
+    async def do_upload():
         try:
-            upload_url = "https://api.upload-post.com/api/upload"
-            headers = {"Authorization": f"Apikey {upload_key}"}
-            data_payload = {
-                "user": post_user,
-                "platform[]": ["youtube"],
-                "title": title,          # required base field (fallback)
-                "async_upload": "true",
-                "youtube_title": title,
-                "youtube_description": description,
-                "privacyStatus": "public",
-            }
-            video_filename = os.path.basename(video_path)
-            thumb_filename = os.path.basename(thumb_path)
-
-            print(f"📡 [Thumbnail] Publishing to YouTube via Upload-Post... (publish_id={publish_id})")
-            with open(video_path, "rb") as vf, open(thumb_path, "rb") as tf:
-                files = {
-                    "video": (video_filename, vf.read(), "video/mp4"),
-                    "thumbnail": (thumb_filename, tf.read(), "image/jpeg"),
-                }
-
-            # Use a long timeout — video uploads can take several minutes
-            with httpx.Client(timeout=600.0) as client:
-                response = client.post(upload_url, headers=headers, data=data_payload, files=files)
-
-            if response.status_code not in [200, 201, 202]:
-                err = f"Upload-Post API Error ({response.status_code}): {response.text}"
-                print(f"❌ {err}")
-                publish_jobs[publish_id]["status"] = "failed"
-                publish_jobs[publish_id]["error"] = err
-            else:
-                print(f"✅ [Thumbnail] Published successfully (publish_id={publish_id})")
-                publish_jobs[publish_id]["status"] = "done"
-                publish_jobs[publish_id]["result"] = response.json()
-
+            print(f"📡 [Thumbnail] Publishing via Postiz... (publish_id={publish_id})")
+            result = await postiz.create_post(video_path, integrations, title, description,
+                                              mode=mode, date=date, thumbnail_path=thumb_path)
+            publish_jobs[publish_id]["status"] = "done"
+            publish_jobs[publish_id]["result"] = {"channels": [i["name"] for i in integrations], "postiz": result}
+            print(f"✅ [Thumbnail] Published (publish_id={publish_id})")
         except Exception as e:
-            err = str(e)
+            err = e.message if isinstance(e, postiz.PostizError) else str(e)
             print(f"❌ Thumbnail Publish Background Error: {err}")
             publish_jobs[publish_id]["status"] = "failed"
             publish_jobs[publish_id]["error"] = err
@@ -6625,242 +6750,6 @@ async def saasshorts_post_to_socials(req: SaaSPostRequest, request: Request):
     except Exception as e:
         print(f"❌ [AI Shorts] Post Exception: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# The gallery and the per-video pages are rendered by this API service, but the
-# app they advertise lives on www. A relative href on `api.` host resolves
-# against `api.`, where `/` is not the app (it is a 404), so every link that
-# crosses hosts is written absolute. `www.openshorts.app/gallery` and
-# `/video/...` 301 to the api host (dashboard/nginx.conf), so the api host is
-# the final domain for those two and the app host is final for everything else.
-APP_HOST = "https://www.openshorts.app"
-GALLERY_HOST = "https://api.openshorts.app"
-
-
-def _json_ld(payload: dict) -> str:
-    """Serialise a JSON-LD payload for an inline <script> block.
-
-    `html.escape()` is the wrong tool here: inside JSON-LD it produces
-    `&amp;quot;` and friends, which is still valid JSON *text* but no longer
-    means what it said, so the crawler reads a literal entity instead of a
-    quote. The right escaping for this context is JSON's own, plus `<>` and `&`
-    as unicode escapes so a title can never close the script tag.
-    """
-    return (
-        json.dumps(payload, ensure_ascii=False)
-        .replace("<", "\\u003c")
-        .replace(">", "\\u003e")
-        .replace("&", "\\u0026")
-    )
-
-
-@app.get("/gallery", response_class=HTMLResponse)
-async def gallery_html_page():
-    """SEO gallery page with all generated UGC videos."""
-    import html as html_mod
-    loop = asyncio.get_running_loop()
-    videos = await loop.run_in_executor(None, list_video_gallery, 100)
-
-    cards_html = ""
-    ld_items = []
-    for i, v in enumerate(videos):
-        # Two versions of the same string on purpose: the HTML one is escaped
-        # for markup, the JSON-LD one is serialised as JSON. Escaping once and
-        # reusing the result in both places is what produced `&amp;amp;`.
-        raw_title = v.get("title", "Untitled")
-        title = html_mod.escape(raw_title)
-        video_url = html_mod.escape(_http_url_or_empty(v.get("video_url", "")))
-        actor_url = html_mod.escape(_http_url_or_empty(v.get("actor_url", "")))
-        video_id = html_mod.escape(str(v.get("video_id", "")))
-        duration = v.get("duration", 0)
-        mode = v.get("video_mode", "")
-        product = html_mod.escape(v.get("product_name", ""))
-        caption = html_mod.escape(v.get("caption", "")[:120])
-
-        mode_badge = '<span style="background:#22c55e;color:#000;padding:2px 8px;border-radius:9999px;font-size:10px;font-weight:700">LOW COST</span>' if mode == "lowcost" else '<span style="background:#8b5cf6;color:#fff;padding:2px 8px;border-radius:9999px;font-size:10px;font-weight:700">PREMIUM</span>'
-
-        cards_html += f'''
-        <a href="/video/{video_id}" style="text-decoration:none;color:inherit">
-          <div style="background:#18181b;border-radius:16px;overflow:hidden;border:1px solid #27272a;transition:transform 0.2s" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
-            <div style="position:relative;aspect-ratio:9/16;background:#000">
-              <video src="{video_url}" poster="{actor_url}" muted playsinline preload="metadata"
-                     onmouseenter="this.play()" onmouseleave="this.pause();this.currentTime=0"
-                     style="width:100%;height:100%;object-fit:cover"></video>
-              <div style="position:absolute;top:8px;right:8px">{mode_badge}</div>
-            </div>
-            <div style="padding:12px">
-              <h2 style="font-size:14px;font-weight:600;margin:0 0 4px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{title}</h2>
-              <p style="font-size:11px;color:#71717a;margin:0">{duration:.0f}s · {product}</p>
-            </div>
-          </div>
-        </a>'''
-
-        ld_items.append(
-            {
-                "@type": "ListItem",
-                "position": i + 1,
-                # The apex 301s to www, which 301s to here: name the host the
-                # page is actually served from.
-                "url": f"{GALLERY_HOST}/video/{video_id}",
-                "name": raw_title,
-            }
-        )
-
-    ld_json = _json_ld(
-        {
-            "@context": "https://schema.org",
-            "@type": "CollectionPage",
-            "name": "AI UGC Video Gallery",
-            "mainEntity": {
-                "@type": "ItemList",
-                "numberOfItems": len(videos),
-                "itemListElement": ld_items,
-            },
-        }
-    )
-
-    return f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI UGC Video Gallery | OpenShorts</title>
-<meta name="description" content="Browse {len(videos)} AI-generated UGC marketing videos. Create viral TikTok and Instagram Reels for your SaaS product.">
-<meta name="robots" content="index, follow">
-<link rel="canonical" href="{GALLERY_HOST}/gallery">
-<meta property="og:title" content="AI UGC Video Gallery | OpenShorts">
-<meta property="og:type" content="website">
-<meta property="og:description" content="Browse AI-generated UGC marketing videos for SaaS products.">
-<script type="application/ld+json">{ld_json}</script>
-<style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{background:#0a0a0c;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,sans-serif}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:20px;padding:20px;max-width:1400px;margin:0 auto}}
-nav{{padding:20px 40px;border-bottom:1px solid #27272a;display:flex;align-items:center;justify-content:space-between}}
-h1{{font-size:28px;font-weight:700;padding:40px 20px 0;text-align:center}}
-.subtitle{{text-align:center;color:#71717a;font-size:14px;padding:8px 20px 20px}}
-.cta{{display:inline-block;background:#8b5cf6;color:#fff;padding:10px 24px;border-radius:12px;text-decoration:none;font-weight:600;font-size:14px}}
-</style>
-</head>
-<body>
-<nav><strong style="font-size:18px">OpenShorts</strong><a href="{APP_HOST}/" class="cta">Create Your Video</a></nav>
-<h1>AI-Generated UGC Videos</h1>
-<p class="subtitle">{len(videos)} videos generated · Low Cost & Premium modes</p>
-<div class="grid">{cards_html}</div>
-<div style="text-align:center;padding:40px"><a href="{APP_HOST}/" class="cta">Create Your Own UGC Video</a></div>
-</body></html>'''
-
-
-def _http_url_or_empty(value) -> str:
-    """``value`` if it is an http(s) URL, else "" (no javascript:/data:)."""
-    value = str(value or "").strip()
-    return value if re.match(r"(?i)^https?://", value) else ""
-
-
-@app.get("/video/{video_id}", response_class=HTMLResponse)
-async def video_html_page(video_id: str):
-    """SEO individual video page with og:video meta tags."""
-    import html as html_mod
-    loop = asyncio.get_running_loop()
-    videos = await loop.run_in_executor(None, list_video_gallery, 200)
-    meta = next((v for v in videos if v.get("video_id") == video_id), None)
-    if not meta:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    # Raw values feed the JSON-LD (serialised as JSON by _json_ld) while the
-    # escaped ones feed the markup; they are not interchangeable.
-    raw_title = meta.get("title", "Untitled")
-    raw_caption = meta.get("caption", "")
-    title = html_mod.escape(raw_title)
-    caption = html_mod.escape(raw_caption)
-    narration = html_mod.escape(meta.get("full_narration", ""))
-    # Everything below lands in markup, generated from user input (product
-    # page scrape, Gemini output): escape it all, and only let http(s) URLs
-    # into src/href/content so a javascript: URL cannot ride along either.
-    raw_video_url = _http_url_or_empty(meta.get("video_url", ""))
-    raw_actor_url = _http_url_or_empty(meta.get("actor_url", ""))
-    video_url = html_mod.escape(raw_video_url)
-    actor_url = html_mod.escape(raw_actor_url)
-    duration = meta.get("duration", 0)
-    mode = meta.get("video_mode", "")
-    product = html_mod.escape(meta.get("product_name", ""))
-    product_url = html_mod.escape(_http_url_or_empty(meta.get("product_url", "")))
-    raw_language = str(meta.get("language", "en") or "en")
-    language = raw_language if re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?", raw_language) else "en"
-    hashtags = html_mod.escape(" ".join(str(h) for h in (meta.get("hashtags") or [])))
-    cost = meta.get("cost_estimate", {}).get("total", 0)
-    created = meta.get("created_at", "")
-    actor_desc = html_mod.escape(meta.get("actor_description", ""))
-
-    ld_json = _json_ld(
-        {
-            "@context": "https://schema.org",
-            "@type": "VideoObject",
-            "name": raw_title,
-            "description": raw_caption,
-            "thumbnailUrl": raw_actor_url,
-            "contentUrl": raw_video_url,
-            "uploadDate": created,
-            "duration": f"PT{int(duration)}S",
-            "width": 1080,
-            "height": 1920,
-            "inLanguage": language,
-        }
-    )
-
-    mode_label = "Low Cost" if mode == "lowcost" else "Premium"
-
-    return f'''<!DOCTYPE html>
-<html lang="{language}">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} - AI UGC Video | OpenShorts</title>
-<meta name="description" content="{caption} {hashtags}">
-<link rel="canonical" href="{GALLERY_HOST}/video/{video_id}">
-<meta property="og:type" content="video.other">
-<meta property="og:title" content="{title}">
-<meta property="og:description" content="{caption}">
-<meta property="og:video" content="{video_url}">
-<meta property="og:video:type" content="video/mp4">
-<meta property="og:video:width" content="1080">
-<meta property="og:video:height" content="1920">
-<meta property="og:image" content="{actor_url}">
-<meta name="twitter:card" content="player">
-<meta name="twitter:title" content="{title}">
-<meta name="twitter:image" content="{actor_url}">
-<script type="application/ld+json">{ld_json}</script>
-<style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{background:#0a0a0c;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,sans-serif}}
-nav{{padding:20px 40px;border-bottom:1px solid #27272a;display:flex;align-items:center;gap:16px}}
-nav a{{color:#a1a1aa;text-decoration:none;font-size:14px}}
-.container{{max-width:1000px;margin:0 auto;padding:40px 20px;display:grid;grid-template-columns:1fr 1fr;gap:40px}}
-@media(max-width:768px){{.container{{grid-template-columns:1fr}}}}
-video{{width:100%;border-radius:16px;background:#000}}
-h1{{font-size:22px;font-weight:700;margin-bottom:8px}}
-.meta{{color:#71717a;font-size:13px;margin-bottom:20px}}
-.section{{margin-bottom:20px}}
-.section h2{{font-size:13px;color:#71717a;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}}
-.section p{{font-size:14px;line-height:1.6}}
-.badge{{display:inline-block;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:700}}
-.cta{{display:inline-block;background:#8b5cf6;color:#fff;padding:10px 24px;border-radius:12px;text-decoration:none;font-weight:600;font-size:14px;margin-top:20px}}
-</style>
-</head>
-<body>
-<nav><strong>OpenShorts</strong><a href="{GALLERY_HOST}/gallery">Gallery</a><span style="color:#3f3f46">›</span><span style="color:#e4e4e7;font-size:14px">{title}</span></nav>
-<div class="container">
-<div><video src="{video_url}" poster="{actor_url}" controls autoplay playsinline style="aspect-ratio:9/16;object-fit:cover"></video></div>
-<div>
-<h1>{title}</h1>
-<p class="meta">{duration:.0f}s · {mode_label} · ${cost:.2f} · {product}</p>
-<div class="section"><h2>Caption</h2><p>{caption}</p><p style="color:#8b5cf6;margin-top:4px">{hashtags}</p></div>
-<div class="section"><h2>Script</h2><p>{narration}</p></div>
-<div class="section"><h2>Actor</h2><p>{actor_desc}</p></div>
-{f'<div class="section"><h2>Product</h2><p><a href="{product_url}" style="color:#8b5cf6" target="_blank">{product}</a></p></div>' if product_url else ''}
-<a href="{GALLERY_HOST}/gallery">← Back to Gallery</a>
-<br><a href="{APP_HOST}/" class="cta">Create Your Own</a>
-</div>
-</div>
-</body></html>'''
 
 
 @app.get("/api/saasshorts/actor-gallery")

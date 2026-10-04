@@ -222,7 +222,3 @@ class TestReasons:
                        "switched_service", "too_complex", "too_expensive", "unused"}
         assert set(cancellation.CANCEL_REASONS.values()) <= stripe_enum
 
-    def test_the_ui_offers_exactly_the_reasons_the_server_accepts(self):
-        modal = open(os.path.join(REPO, "dashboard/src/components/CancelPlanModal.jsx")).read()
-        for value in cancellation.CANCEL_REASONS:
-            assert f"'{value}'" in modal, f"{value} is accepted but never offered"

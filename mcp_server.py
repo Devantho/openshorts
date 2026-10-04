@@ -51,7 +51,7 @@ INSTRUCTIONS = (
 
 # Headers an MCP caller may use to authenticate / bring their own keys; they are
 # forwarded verbatim to the internal endpoints so every existing auth path works.
-_FORWARD_HEADERS = ("authorization", "x-api-key", "x-gemini-key", "x-upload-post-key")
+_FORWARD_HEADERS = ("authorization", "cookie", "x-api-key", "x-gemini-key")
 
 _LOG_TAIL = 10  # status logs are for humans; agents only need the tail
 
@@ -311,12 +311,12 @@ TOOLS = [
     },
     {
         "name": "publish_clip",
-        "title": "Publish a clip to social platforms",
+        "title": "Publish a clip through Postiz",
         "description": (
-            "Post one clip to the user's connected accounts (TikTok lands as a "
-            "draft in the app; Instagram and YouTube publish directly). Requires "
-            "a connected social profile (cloud) or an Upload-Post key (self-host). "
-            "Optionally schedule with an ISO-8601 scheduled_date."
+            "Post one clip through the server's Postiz instance. Target channels "
+            "either by platform (every connected Postiz channel of that type, e.g. "
+            "youtube, tiktok, instagram) or by explicit Postiz integration ids. "
+            "mode: now (default), schedule (needs ISO-8601 scheduled_date) or draft."
         ),
         "inputSchema": {
             "type": "object",
@@ -325,14 +325,16 @@ TOOLS = [
                 "clip_index": {"type": "integer"},
                 "platforms": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["tiktok", "instagram", "youtube"]},
+                    "items": {"type": "string"},
+                    "description": "Postiz provider identifiers, e.g. youtube, tiktok, instagram, x, linkedin.",
                 },
+                "integration_ids": {"type": "array", "items": {"type": "string"}},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
-                "scheduled_date": {"type": "string", "description": "ISO-8601; omit to post now."},
-                "timezone": {"type": "string"},
+                "mode": {"type": "string", "enum": ["now", "schedule", "draft"]},
+                "scheduled_date": {"type": "string", "description": "ISO-8601; required when mode=schedule."},
             },
-            "required": ["job_id", "clip_index", "platforms"],
+            "required": ["job_id", "clip_index"],
         },
     },
 ]
@@ -499,12 +501,24 @@ async def _tool_recut_clip(client, args):
 
 
 async def _tool_publish_clip(client, args):
-    body = {"job_id": args["job_id"], "clip_index": args["clip_index"],
-            "platforms": args["platforms"]}
-    for k in ("title", "description", "scheduled_date", "timezone"):
+    ids = list(args.get("integration_ids") or [])
+    platforms = {p.lower() for p in (args.get("platforms") or [])}
+    if platforms:
+        resp = await client.get("/api/postiz/integrations")
+        if resp.status_code >= 400:
+            return _api_error(resp), True
+        for it in resp.json().get("integrations", []):
+            if not it.get("disabled") and it.get("identifier", "").lower() in platforms and it["id"] not in ids:
+                ids.append(it["id"])
+    if not ids:
+        return {"error": "No matching Postiz channel. Pass platforms or integration_ids."}, True
+    mode = args.get("mode") or ("schedule" if args.get("scheduled_date") else "now")
+    body = {"kind": "clip", "job_id": args["job_id"], "clip_index": args["clip_index"],
+            "integration_ids": ids, "mode": mode}
+    for k in ("title", "description", "scheduled_date"):
         if args.get(k) is not None:
             body[k] = args[k]
-    resp = await client.post("/api/social/post", json=body)
+    resp = await client.post("/api/postiz/post", json=body)
     if resp.status_code >= 400:
         return _api_error(resp), True
     return resp.json(), False

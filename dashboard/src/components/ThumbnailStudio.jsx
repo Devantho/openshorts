@@ -4,6 +4,7 @@ import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
 import StepIndicator from './ui/StepIndicator';
 import SegmentedControl from './ui/SegmentedControl';
+import PostizChannelPicker from './PostizChannelPicker';
 
 const STEPS = ['Input', 'Titles', 'Generate', 'Description', 'Publish'];
 
@@ -70,11 +71,17 @@ function DragDropZone({ label, accept, onFile, file, onClear, icon }) {
   );
 }
 
-export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUserId, managed = false, onCreateClips = null }) {
-  // Managed (hosted plan): Gemini runs server-side via the bearer token, no BYOK key.
-  // Only send X-Gemini-Key for self-host BYOK. apiFetch attaches the bearer token.
-  const keyHeader = geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {};
-  const needsKey = !geminiApiKey && !managed;
+// The Gemini key is stored server-side and added to requests there.
+export default function ThumbnailStudio({ hasGemini, channels, channelsError, onOpenSettings, onCreateClips = null }) {
+  const keyHeader = {};
+  const needsKey = !hasGemini;
+  // YouTube channels only: the custom thumbnail is a YouTube feature.
+  const ytChannels = Array.isArray(channels) ? channels.filter((c) => c.identifier === 'youtube') : channels;
+  const [publishChannels, setPublishChannels] = useState([]);
+  useEffect(() => {
+    if (Array.isArray(ytChannels)) setPublishChannels(ytChannels.filter((c) => !c.disabled).map((c) => c.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channels]);
   // Step management
   const [step, setStep] = useState(0);
   const [mode, setMode] = useState(null); // 'video' or 'manual'
@@ -376,7 +383,7 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
 
   // --- Publish to YouTube ---
   const handlePublish = async () => {
-    if (!managed && (!uploadPostKey || !uploadUserId)) return alert('Please configure your Upload-Post API key and user in Settings first.');
+    if (!publishChannels.length) return alert('Select a YouTube channel from Postiz first.');
     const finalTitle = selectedTitle || manualTitle;
     if (!finalTitle) return alert('No title selected.');
     if (!selectedThumbnail) return alert('Please select a thumbnail first.');
@@ -390,8 +397,8 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
       formData.append('title', finalTitle);
       formData.append('description', description);
       formData.append('thumbnail_url', selectedThumbnail);
-      formData.append('api_key', uploadPostKey);
-      formData.append('user_id', uploadUserId);
+      formData.append('integration_ids', publishChannels.join(','));
+      formData.append('mode', 'now');
 
       // Submit the publish job — returns immediately with a publish_id
       const res = await apiFetch('/api/thumbnail/publish', {
@@ -1136,26 +1143,31 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
               </div>
 
               {/* Publish Button */}
-              {(!managed && (!uploadPostKey || !uploadUserId)) ? (
+              {ytChannels === null ? (
                 <div className="glass-panel p-6 space-y-3">
                   <div className="flex items-center gap-2 text-warn">
                     <AlertCircle size={16} />
-                    <span className="text-sm font-medium lowercase">Upload-Post Not Configured</span>
+                    <span className="text-sm font-medium lowercase">Postiz Not Configured</span>
                   </div>
                   <p className="text-xs text-muted">
-                    To publish directly to YouTube, configure your Upload-Post API key and connect a profile in Settings.
+                    To publish directly to YouTube, configure your Postiz instance in Settings and connect a YouTube channel in Postiz.
                   </p>
                   <button
-                    onClick={() => { }}
+                    onClick={() => onOpenSettings?.()}
                     className="text-xs lowercase text-brass hover:underline flex items-center gap-1"
                   >
                     <Settings size={12} /> Go to Settings
                   </button>
                 </div>
               ) : (
+                <div className="space-y-3">
+                <div className="glass-panel p-4 space-y-2">
+                  <p className="eyebrow">YOUTUBE CHANNEL (POSTIZ)</p>
+                  <PostizChannelPicker channels={ytChannels} error={channelsError} value={publishChannels} onChange={setPublishChannels} />
+                </div>
                 <button
                   onClick={handlePublish}
-                  disabled={isPublishing}
+                  disabled={isPublishing || !publishChannels.length}
                   className="w-full btn-primary"
                 >
                   {isPublishing ? (
@@ -1170,6 +1182,7 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
                     </>
                   )}
                 </button>
+                </div>
               )}
 
               {/* Polling status */}
@@ -1187,7 +1200,7 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
                     <div className="space-y-2">
                       <span className="badge-ok">PUBLISHED</span>
                       <p className="text-sm lowercase font-medium text-ink">Published successfully!</p>
-                      <p className="text-xs text-muted">Your video is being uploaded to YouTube asynchronously.</p>
+                      <p className="text-xs text-muted">Sent to Postiz{publishResult.data?.channels?.length ? ` → ${publishResult.data.channels.join(', ')}` : ''}. Postiz uploads it to YouTube.</p>
                       {onCreateClips && sessionId && (
                         <button
                           onClick={() => onCreateClips(sessionId)}

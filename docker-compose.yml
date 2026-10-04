@@ -1,13 +1,20 @@
+# Development stack (hot reload). Panel: http://localhost:5175
+# Production: docker compose -f docker-compose.prod.yml up -d --build
 services:
   backend:
     build: .
     container_name: openshorts-backend
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "8000:8000"
     volumes:
       - .:/app
       - /app/__pycache__
       - ./output:/app/output
+      # Server-side API keys, panel password hash and session secret.
+      - ./data:/app/data
     restart: unless-stopped
 
   frontend:
@@ -24,13 +31,12 @@ services:
     depends_on:
       - backend
 
+  # Remotion renderer: only the backend talks to it, so no published port.
   renderer:
     build:
       context: .
       dockerfile: render-service/Dockerfile
     container_name: openshorts-renderer
-    ports:
-      - "3100:3100"
     volumes:
       - ./output:/output
     environment:

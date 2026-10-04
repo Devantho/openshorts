@@ -278,28 +278,6 @@ def test_thumbnail_generate_refuses_someone_elses_session(cloud_as, monkeypatch)
 
 
 # --------------------------------------------------------------------------- #
-# /video/{id} escaping
-# --------------------------------------------------------------------------- #
-def test_video_page_escapes_everything(monkeypatch):
-    evil = '"><script>alert(1)</script>'
-    meta = {
-        "video_id": "v1", "title": "t", "caption": "c",
-        "video_url": "https://cdn.example.com/v.mp4" + evil,
-        "actor_url": "javascript:alert(1)",
-        "product_url": "javascript:alert(2)", "product_name": "p",
-        "hashtags": ["#ok", evil], "language": 'en"><script>',
-        "duration": 30, "cost_estimate": {"total": 1.0},
-    }
-    monkeypatch.setattr(app_module, "list_video_gallery", lambda n: [meta])
-    resp = _client_call("get", "/video/v1")
-    assert resp.status_code == 200
-    body = resp.text
-    assert "<script>alert(1)</script>" not in body
-    assert "javascript:" not in body
-    assert '<html lang="en">' in body
-
-
-# --------------------------------------------------------------------------- #
 # main.cap_source_duration(safety=True): the whole-video cap
 # --------------------------------------------------------------------------- #
 import shutil

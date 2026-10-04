@@ -1,0 +1,52 @@
+# Production stack: nginx serves the built panel and proxies the API on the
+# same origin (required by the session cookie). Only port 8080 is published;
+# put your TLS reverse proxy (Caddy, Traefik...) in front of it.
+#
+#   cp .env.example .env   # set APP_PASSWORD at least
+#   docker compose -f docker-compose.prod.yml up -d --build
+# Fixed project name: containers and named volumes (keys, password, clips)
+# stay the same whatever directory the runner checks the repo out to.
+name: bomshort
+
+services:
+  backend:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # Named volumes inherit the image's appuser ownership (bind mounts would
+      # be root-owned and unwritable by the non-root backend).
+      - output:/app/output
+      - uploads:/app/uploads
+      - data:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./dashboard
+      target: prod
+    ports:
+      - "${PANEL_PORT:-8080}:80"
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  renderer:
+    build:
+      context: .
+      dockerfile: render-service/Dockerfile
+    volumes:
+      - output:/output
+    environment:
+      - REMOTION_BUNDLE_PATH=/app/remotion
+      - OUTPUT_DIR=/output
+      - PORT=3100
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+volumes:
+  output:
+  uploads:
+  data:

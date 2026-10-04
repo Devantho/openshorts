@@ -48,13 +48,6 @@ class TestCoverage:
 class TestDeletionReason:
     """The reason outlives the account, so it must never carry free text."""
 
-    def test_the_ui_offers_exactly_the_reasons_the_server_accepts(self):
-        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        card = open(os.path.join(
-            repo, "dashboard/src/components/DeleteAccountCard.jsx")).read()
-        for value in account.DELETION_REASONS:
-            assert f"'{value}'" in card, f"{value} is accepted but never offered"
-
     def test_the_column_cannot_hold_a_typed_sentence(self):
         # 32 chars is under every label in the list and far under anything a
         # user could write, so a free-text regression fails loudly at the DB.

@@ -1,47 +1,23 @@
-// Centralized API client for cloud mode.
-// Adds the Authorization: Bearer header from the stored session token, and turns
-// a 402 (quota exceeded) into a typed QuotaError the UI can catch to prompt a top-up.
+// Centralized API client.
+// The panel session is an HttpOnly cookie set by /api/auth/login, so requests
+// only need to be same-origin (credentials: 'include' also covers a
+// VITE_API_URL on another origin listed in the backend's CORS_ORIGINS).
+// A 401 anywhere means the session expired: the auth gate listens for
+// AUTH_EXPIRED_EVENT and shows the login screen again.
 import { getApiUrl } from '../config';
 
-export const AUTH_TOKEN_KEY = 'openshorts_auth';
+export const AUTH_EXPIRED_EVENT = 'panel-auth-expired';
 
-export const getToken = () => localStorage.getItem(AUTH_TOKEN_KEY) || '';
-export const setToken = (t) => localStorage.setItem(AUTH_TOKEN_KEY, t);
-export const clearToken = () => localStorage.removeItem(AUTH_TOKEN_KEY);
-
-export class QuotaError extends Error {
-  constructor(detail) {
-    super('quota_exceeded');
-    this.name = 'QuotaError';
-    this.minutesRequired = detail?.minutes_required;
-    this.minutesRemaining = detail?.minutes_remaining;
-    // Minutes of the source the server offers to clip instead (0 = no offer).
-    this.partialMinutes = Number(detail?.partial_minutes) || 0;
-  }
-}
-
-// Drop-in fetch wrapper. Always attaches the bearer token when present.
 export async function apiFetch(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  const token = getToken();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-
-  const res = await fetch(getApiUrl(path), { ...options, headers });
-
-  if (res.status === 402) {
-    let detail = {};
-    try {
-      const body = await res.clone().json();
-      detail = body.detail || body;
-    } catch (_) { /* ignore */ }
-    throw new QuotaError(detail);
+  const res = await fetch(getApiUrl(path), { credentials: 'include', ...options });
+  if (res.status === 401 && !String(path).startsWith('/api/auth/')) {
+    window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
   }
   return res;
 }
 
 // A failed request, carrying the server's own explanation. Callers that show an
-// alert should prefer `detail` — the generic "something went wrong" strings hid
-// real, actionable messages (e.g. a declined card blocking checkout).
+// alert should prefer `detail`.
 export class ApiError extends Error {
   constructor(status, detail, raw) {
     super(`${status}: ${raw}`);   // message kept verbatim for existing callers

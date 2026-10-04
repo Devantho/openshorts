@@ -4,7 +4,7 @@ import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
 import StepIndicator from './ui/StepIndicator';
 import SegmentedControl from './ui/SegmentedControl';
-import StarBanner from './StarBanner';
+import PostizPostModal from './PostizPostModal';
 
 const STYLE_OPTIONS = [
   { id: 'ugc', label: 'UGC Natural', desc: 'Authentic, talking to camera' },
@@ -40,11 +40,11 @@ function saveCache(url, analysis, webResearch, scripts) {
   } catch { /* localStorage full */ }
 }
 
-export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uploadPostKey, uploadUserId, managed = false }) {
-  // Managed (hosted plan): Gemini (script) + Upload-Post run server-side via the
-  // bearer token — no BYOK Gemini key needed. fal.ai + ElevenLabs stay BYOK.
-  const geminiHeader = geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {};
-  const needsGeminiKey = !geminiApiKey && !managed;
+// API keys live on the server (Settings) and are added to each request there;
+// the props below are only booleans saying which ones are configured.
+export default function SaaShortsTab({ hasGemini, elevenLabsKey, falKey, channels, channelsError, onOpenSettings }) {
+  const geminiHeader = {};
+  const needsGeminiKey = !hasGemini;
   // Wizard state
   const [step, setStep] = useState(() => {
     const cache = loadCache();
@@ -90,11 +90,7 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
   const [genResult, setGenResult] = useState(null);
 
   // Publish
-  const [publishing, setPublishing] = useState(false);
-  const [publishResult, setPublishResult] = useState(null);
-  const [publishPlatforms, setPublishPlatforms] = useState({ tiktok: true, instagram: true, youtube: true });
-  const [isScheduling, setIsScheduling] = useState(false);
-  const [scheduleDate, setScheduleDate] = useState('');
+  const [showPublish, setShowPublish] = useState(false);
 
   // UI
   const [copied, setCopied] = useState('');
@@ -125,7 +121,6 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
     if (elevenLabsKey) {
       fetchVoices();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [elevenLabsKey]);
 
   // Reset selected voice when actor gender changes
@@ -186,9 +181,7 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
 
   const fetchVoices = async () => {
     try {
-      const res = await fetch(getApiUrl('/api/saasshorts/voices'), {
-        headers: { 'X-ElevenLabs-Key': elevenLabsKey },
-      });
+      const res = await apiFetch('/api/saasshorts/voices');
       if (res.ok) {
         const data = await res.json();
         setVoices(data.voices || []);
@@ -292,8 +285,6 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Fal-Key': falKey,
-          'X-ElevenLabs-Key': elevenLabsKey,
         },
         body: JSON.stringify({
           script: scriptToSend,
@@ -339,8 +330,6 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Fal-Key': falKey,
-          'X-ElevenLabs-Key': elevenLabsKey,
         },
         body: JSON.stringify({
           script: scriptToSend,
@@ -1021,7 +1010,7 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                     try {
                       const res = await apiFetch('/api/saasshorts/actor-options', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'X-Fal-Key': falKey },
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ actor_description: actorDescription, num_options: 3 }),
                       });
                       if (res.ok) {
@@ -1139,7 +1128,7 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                 <span>
                   Share this video in the public gallery
                   <span className="block text-xs text-muted">
-                    Your video, product name and script will be visible at openshorts.app/gallery
+                    Your video, product name and script will be listed in the S3 gallery of this server (/gallery)
                   </span>
                 </span>
               </label>
@@ -1280,7 +1269,7 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
               </h2>
 
               <div className="mb-4">
-                <StarBanner message="Happy with your short?" />
+
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -1379,113 +1368,19 @@ export default function SaaShortsTab({ geminiApiKey, elevenLabsKey, falKey, uplo
                   <div className="card p-4 space-y-3 mt-2">
                     <h3 className="eyebrow">Publish to Social Media</h3>
 
-                    {!uploadPostKey ? (
-                      <p className="text-xs lowercase text-muted">Set your Upload-Post API key in Settings to enable publishing.</p>
-                    ) : (
-                      <>
-                        {/* Platform toggles */}
-                        <SegmentedControl
-                          multi
-                          size="sm"
-                          options={[
-                            { value: 'tiktok', label: 'TikTok' },
-                            { value: 'instagram', label: 'Instagram' },
-                            { value: 'youtube', label: 'YouTube' },
-                          ]}
-                          value={Object.keys(publishPlatforms).filter((k) => publishPlatforms[k])}
-                          onChange={(arr) => setPublishPlatforms({
-                            tiktok: arr.includes('tiktok'),
-                            instagram: arr.includes('instagram'),
-                            youtube: arr.includes('youtube'),
-                          })}
-                        />
-
-                        {/* Same notice as ResultCard: TikTok lands as a draft,
-                            and finding nothing live reads as a failed post. */}
-                        {publishPlatforms.tiktok && (
-                          <p className="mt-2 text-xs text-muted lowercase">
-                            tiktok arrives as a <b className="text-ink2">draft</b> and you'll get a
-                            notification in the app — finishing it there lets you add trending sounds
-                            and hashtags, which reaches more people than posting from an api.
-                          </p>
-                        )}
-
-                        {/* Schedule toggle */}
-                        <div className="flex items-center gap-3">
-                          <label className="flex items-center gap-2 text-xs lowercase text-muted cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={isScheduling}
-                              onChange={(e) => setIsScheduling(e.target.checked)}
-                              className="w-3.5 h-3.5 rounded accent-brass"
-                            />
-                            <Calendar size={12} /> Schedule
-                          </label>
-                          {isScheduling && (
-                            <input
-                              type="datetime-local"
-                              value={scheduleDate}
-                              onChange={(e) => setScheduleDate(e.target.value)}
-                              className="input-field text-xs py-1 px-2 w-auto"
-                            />
-                          )}
-                        </div>
-
-                        {/* Publish button */}
-                        <button
-                          onClick={async () => {
-                            const selected = Object.keys(publishPlatforms).filter(k => publishPlatforms[k]);
-                            if (selected.length === 0) { setPublishResult({ ok: false, msg: 'Select at least one platform' }); return; }
-                            if (isScheduling && !scheduleDate) { setPublishResult({ ok: false, msg: 'Select a date' }); return; }
-
-                            setPublishing(true);
-                            setPublishResult(null);
-                            try {
-                              const payload = {
-                                job_id: jobId,
-                                api_key: uploadPostKey,
-                                user_id: uploadUserId,
-                                platforms: selected,
-                                title: genResult.script?.title,
-                                description: genResult.script?.caption || genResult.script?.full_narration,
-                              };
-                              if (isScheduling && scheduleDate) {
-                                payload.scheduled_date = new Date(scheduleDate).toISOString();
-                                payload.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-                              }
-                              const res = await apiFetch('/api/saasshorts/post', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(payload),
-                              });
-                              if (!res.ok) {
-                                const err = await res.json().catch(() => ({ detail: 'Failed' }));
-                                throw new Error(err.detail || 'Failed');
-                              }
-                              setPublishResult({ ok: true, msg: isScheduling ? 'Scheduled!' : 'Published!' });
-                            } catch (e) {
-                              setPublishResult({ ok: false, msg: e.message });
-                            } finally {
-                              setPublishing(false);
-                            }
-                          }}
-                          disabled={publishing}
-                          className="btn-primary w-full py-2 text-sm"
-                        >
-                          {publishing ? (
-                            <><Loader2 size={14} className="animate-spin" /> {isScheduling ? 'Scheduling...' : 'Publishing...'}</>
-                          ) : (
-                            <><Share2 size={14} /> {isScheduling ? 'Schedule post' : 'Publish now'}</>
-                          )}
-                        </button>
-
-                        {publishResult && (
-                          <p className={`text-xs ${publishResult.ok ? 'text-ok' : 'text-danger'}`}>
-                            {publishResult.msg}
-                          </p>
-                        )}
-                      </>
-                    )}
+                    <button onClick={() => setShowPublish(true)} className="btn-primary w-full py-2 text-sm">
+                      <Share2 size={14} /> Publish via Postiz
+                    </button>
+                    <PostizPostModal
+                      isOpen={showPublish}
+                      onClose={() => setShowPublish(false)}
+                      source={{ kind: 'saas', job_id: jobId }}
+                      defaultTitle={genResult.script?.title || ''}
+                      defaultDescription={genResult.script?.caption || genResult.script?.full_narration || ''}
+                      channels={channels}
+                      channelsError={channelsError}
+                      onOpenSettings={onOpenSettings}
+                    />
                   </div>
                 </div>
               </div>

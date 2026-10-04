@@ -62,3 +62,8 @@ README.md
 
 
 
+
+# Panel secrets (server-side keys)
+data/
+output/
+uploads/
