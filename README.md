@@ -46,6 +46,21 @@ docker compose up --build
 
 Panel sur `http://localhost:5175`.
 
+## Suivi de chaînes (page « Channels »)
+
+Ajoute des chaînes YouTube à suivre (URL, `@handle` ou id `UC…`). Le serveur lit leur flux RSS
+public toutes les 15 min (`CHANNEL_POLL_SECONDS`). Chaque vidéo publiée **après** l'ajout de la
+chaîne est envoyée au découpeur de clips. Quand le job est terminé, ses clips (meilleur score
+d'abord) sont programmés sur Postiz dans les prochains créneaux libres : **7h30, 11h30 et 17h30
+chaque jour** (heure de Paris par défaut), sur les 7 jours à venir. Les créneaux sont partagés
+entre toutes les chaînes : deux vidéos ne prennent jamais le même horaire.
+
+Réglable sur la page : horaires, fuseau, fenêtre (jours), nombre max de clips par vidéo, canaux
+Postiz (par défaut ceux de l'auto-post), mode programmé ou brouillon, ignorer les Shorts, hook
+texte. Les vidéos plus anciennes peuvent être traitées à la main (« latest videos » → « clip &
+schedule »). Les clips qui ne tiennent pas dans la fenêtre ne sont pas programmés (indiqué sur la
+page). État dans `data/channels.json`. `CHANNEL_WATCH_DISABLED=1` coupe le poller.
+
 ## CI/CD (GitHub Actions + runner auto-hébergé)
 
 `.github/workflows/ci.yml` :

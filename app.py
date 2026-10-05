@@ -40,6 +40,7 @@ load_dotenv()
 import settings_store
 import panel_auth
 import postiz
+import channel_watch
 
 # Constants
 UPLOAD_DIR = "uploads"
@@ -2284,6 +2285,9 @@ async def lifespan(app: FastAPI):
     # Start worker and cleanup
     worker_task = asyncio.create_task(process_queue())
     cleanup_task = asyncio.create_task(cleanup_jobs())
+    if not BILLING_ENABLED:
+        # Followed YouTube channels -> clips scheduled on Postiz.
+        channel_watch.start(app, jobs.get, is_active=lambda: not _draining)
     if BILLING_ENABLED:
         await cloud.setup_async(app, keep_reservation_ids=_resumed_reservation_ids)
         # Account erasure lives in cloud/, which can't import app.py; hand it the
@@ -2318,6 +2322,7 @@ app.include_router(_mcp_server.router)
 
 # Postiz publishing (manual posts + auto-post after each job).
 app.include_router(postiz.router)
+app.include_router(channel_watch.router)
 
 # Password protection for every route except /health* and the login endpoints.
 # Added before CORS so CORS stays the outermost layer.
@@ -2787,11 +2792,23 @@ postiz.configure(resolve_media=_postiz_media)
 
 
 async def _postiz_autopost(job_id, job):
-    if BILLING_ENABLED or not job or job.get('status') != 'completed':
+    if BILLING_ENABLED or not job:
+        return
+    log = lambda line: job.setdefault('logs', []).append(line)
+    # Jobs started by the channel watch are scheduled in its publishing slots
+    # instead of going through the generic auto-post (a failed one is marked
+    # failed on its page right away).
+    if channel_watch.is_watch_job(job_id):
+        try:
+            await channel_watch.schedule_job(job_id, log)
+        except Exception as e:
+            print(f"⚠️ Channel watch scheduling error for {job_id}: {e}")
+        return
+    if job.get('status') != 'completed':
         return
     clips = (job.get('result') or {}).get('clips') or []
     try:
-        summary = await postiz.autopost_job(job_id, clips, lambda line: job.setdefault('logs', []).append(line))
+        summary = await postiz.autopost_job(job_id, clips, log)
     except Exception as e:
         print(f"⚠️ Auto-post error for {job_id}: {e}")
         return

@@ -31,7 +31,7 @@ jobs:
         run: >
           pip install pytest pillow httpx pydantic sqlalchemy greenlet numpy
           opencv-python-headless python-dotenv google-genai fastapi boto3
-          PyJWT email-validator python-multipart
+          PyJWT email-validator python-multipart tzdata
       - name: Run tests
         run: pytest tests/ -v
 

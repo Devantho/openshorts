@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Sparkles, Youtube, Instagram, ChevronDown, Activity, LayoutDashboard, Settings, Plus, X, Terminal, LayoutGrid, Image, RotateCcw, Calendar, AlertTriangle, KeyRound, Loader2, Download, Menu, LogOut, Share2 } from 'lucide-react';
+import { Sparkles, Youtube, Instagram, ChevronDown, Activity, LayoutDashboard, Settings, Plus, X, Terminal, LayoutGrid, Image, RotateCcw, Calendar, AlertTriangle, KeyRound, Loader2, Download, Menu, LogOut, Share2, Tv } from 'lucide-react';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
@@ -10,6 +10,7 @@ import ScheduleWeekModal from './components/ScheduleWeekModal';
 import ClipEditor from './components/ClipEditor';
 import ReframeEditor from './components/ReframeEditor';
 import SettingsPanel from './components/SettingsPanel';
+import ChannelsPage from './components/ChannelsPage';
 import Modal from './components/ui/Modal';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch } from './lib/api';
@@ -394,6 +395,7 @@ function App() {
   // bottom tab bar. `short` is the tab-bar label.
   const navItems = [
     { id: 'dashboard', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
+    { id: 'channels', icon: Tv, label: 'Channels', short: 'channels', primary: true },
     { id: 'saasshorts', icon: Sparkles, label: 'AI Shorts', short: 'ai shorts', primary: true },
     { id: 'ugc-gallery', icon: LayoutGrid, label: 'UGC Gallery', short: 'gallery' },
     { id: 'thumbnails', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
@@ -603,6 +605,15 @@ function App() {
 
           {activeTab === 'settings' && (
             <SettingsPanel channels={channels} channelsError={channelsError} reloadChannels={reloadChannels} />
+          )}
+
+          {activeTab === 'channels' && (
+            <ChannelsPage
+              channels={channels}
+              channelsError={channelsError}
+              onOpenSettings={openSettings}
+              postizConfigured={postizConfigured}
+            />
           )}
 
           {activeTab === 'saasshorts' && (
