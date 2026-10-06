@@ -307,10 +307,14 @@ class TestAutoCaptionDefaults:
         assert AUTO_CAPTION_STYLE["font_name"] in {
             "Anton", "Liberation Sans", "Liberation Serif", "DejaVu Sans"}
 
-    def test_highlight_differs_from_body_text(self):
-        # The whole point of the karaoke look: the active word must stand out.
-        from subtitles import AUTO_CAPTION_STYLE as s
-        assert s["highlight_color"].lower() != s["font_color"].lower()
+    def test_default_is_the_bomshort_look(self):
+        # Chosen by the owner (6-oct-2026): plain white uppercase, size S,
+        # bottom, black outline, no animation and no active-word highlight.
+        from subtitles import AUTO_CAPTION_STYLE as s, line_budget
+        assert s["highlight_color"].lower() == s["font_color"].lower() == "#ffffff"
+        assert (s["alignment"], s["font_size"], s["effect"], s["border_width"]) == ("bottom", 34, "none", 3)
+        assert s["uppercase"] is True and s["base_opacity"] == 1.0
+        assert s["max_chars"] == line_budget(s["font_name"], s["font_size"])
 
     def test_captions_clear_the_platform_ui(self, tmp_path):
         from subtitles import SAFE_MARGIN_V, generate_ass

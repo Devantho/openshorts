@@ -229,26 +229,26 @@ def generate_srt(transcript, clip_start, clip_end, output_path, max_chars=20, ma
 SAFE_MARGIN_V = 43
 
 
-# The caption look applied automatically to every generated clip. Chosen by
-# rendering four candidates on a real clip and comparing them (25-jul-2026):
-# white Anton uppercase with a yellow active word, heavy black outline, gentle
-# pop. Yellow because it is the one colour that almost never occurs in footage,
-# so the active word reads instantly on any background; the base text stays
-# fully opaque (dimming it tested worse over bright scenes). This is a starting
-# point, not a cage — the subtitle modal still overrides every field.
+# The caption look applied automatically to every generated clip (BomShort
+# defaults, 6-oct-2026): white Impact uppercase at size S, bottom, black
+# 3px outline, no animation and no active-word highlight (the highlight is
+# the body colour), no background. Impact is aliased to Anton by
+# fonts/openshorts-fontmap.conf, so Anton is named here: libass would
+# otherwise fall back silently when the alias is missing. The subtitle modal
+# still overrides every field.
 AUTO_CAPTION_STYLE = {
     "style": "karaoke",
     "alignment": "bottom",
     "font_name": "Anton",
-    "font_size": 44,
+    "font_size": 34,
     "font_color": "#FFFFFF",
-    "highlight_color": "#FFE500",
+    "highlight_color": "#FFFFFF",
     "border_color": "#000000",
-    "border_width": 4,
-    "effect": "pop",
+    "border_width": 3,
+    "effect": "none",
     "base_opacity": 1.0,
     "uppercase": True,
-    "max_chars": 16,
+    "max_chars": 21,
     "max_duration": 1.4,
 }
 
@@ -261,9 +261,9 @@ _PRESET_BASE = {"style": "karaoke", "font_color": "#FFFFFF", "bg_opacity": 0.0,
                 "base_opacity": 1.0, "reveal": False, "shadow": 0,
                 "max_duration": 1.4}
 CAPTION_PRESETS = {
-    "default": {**_PRESET_BASE, "font_name": "Anton", "font_size": 44,
-                "highlight_color": "#FFE500", "border_width": 4, "effect": "pop",
-                "uppercase": True, "max_chars": 16},
+    "default": {**_PRESET_BASE, "font_name": "Anton", "font_size": 34,
+                "highlight_color": "#FFFFFF", "border_width": 3, "effect": "none",
+                "uppercase": True, "max_chars": 21},
     # Words appear as they are spoken, yellow active word, shadow.
     "hormozi": {**_PRESET_BASE, "font_name": "Montserrat ExtraBold", "font_size": 44,
                 "highlight_color": "#FFE500", "border_width": 4, "shadow": 2,

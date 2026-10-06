@@ -80,7 +80,7 @@ const POSITION_OPTIONS = [
 // dimmed base text + strong active word, optional glow/pop/box effect.
 const CAPTION_PRESETS = [
     // What every clip ships with (subtitles.AUTO_CAPTION_STYLE).
-    { id: 'default', label: 'Default',  style: 'karaoke', effect: 'pop',       highlightColor: '#FFE500', baseOpacity: 1.0, uppercase: true,  fontName: 'Anton', borderWidth: 4, fontSize: 44 },
+    { id: 'default', label: 'Default',  style: 'karaoke', effect: 'none',      highlightColor: '#FFFFFF', baseOpacity: 1.0, uppercase: true,  fontName: 'Impact', borderWidth: 3, fontSize: 34 },
     // Trending short-form looks (2026): word-by-word build-up, a box behind
     // the active word, one big word at a time, and the clean shadow-only look.
     { id: 'hormozi', label: 'Hormozi',  style: 'karaoke', effect: 'pop',       highlightColor: '#FFE500', baseOpacity: 1.0, uppercase: true,  fontName: 'Montserrat ExtraBold', borderWidth: 4, shadow: 2, reveal: true, fontSize: 44 },
@@ -118,20 +118,20 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     // Opens on the look the clip already has (the Default preset), so
     // "apply" without touching anything changes nothing.
     const [position, setPosition] = useState('bottom');
-    const [fontSize, setFontSize] = useState(44);
-    const [fontName, setFontName] = useState('Anton');
+    const [fontSize, setFontSize] = useState(34);
+    const [fontName, setFontName] = useState('Impact');
     const [fontColor, setFontColor] = useState('#FFFFFF');
-    const [highlightColor, setHighlightColor] = useState('#FFE500');
+    const [highlightColor, setHighlightColor] = useState('#FFFFFF');
     const [borderColor, setBorderColor] = useState('#000000');
-    const [borderWidth, setBorderWidth] = useState(4);
+    const [borderWidth, setBorderWidth] = useState(3);
     const [bgColor, setBgColor] = useState('#000000');
     const [bgOpacity, setBgOpacity] = useState(0.0);
-    const [animation, setAnimationState] = useState('pop');
+    const [animation, setAnimationState] = useState('none');
     const [showTextEditor, setShowTextEditor] = useState(false);
 
     // Karaoke (server-side ASS burn) state
     const [style, setStyle] = useState('karaoke'); // classic | karaoke
-    const [effect, setEffect] = useState('pop'); // none | glow | pop | box | highlight
+    const [effect, setEffect] = useState('none'); // none | glow | pop | box | highlight
     const [baseOpacity, setBaseOpacity] = useState(1.0);
     const [uppercase, setUppercase] = useState(true);
     const [reveal, setReveal] = useState(false);

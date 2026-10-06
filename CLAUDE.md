@@ -38,7 +38,15 @@ Cloud-mode code (`cloud/`, `BILLING_ENABLED`) is still in the tree but unused.
   Europe/Paris, 7-day horizon) from a slot ledger shared by all channels.
   Idempotent; the poll loop also catches up jobs whose hook was missed.
   State in `DATA_DIR/channels.json`.
-- Tests: `tests/test_panel_auth.py`, `tests/test_channel_watch.py`; `tests/conftest.py` turns the middleware
+- **Clips library** (`LibraryPage.jsx`, `GET/DELETE /api/library`): every job in
+  `jobs`, titled from the channel watch record, else the `*_metadata.json`
+  stem, else the `.source.json` sidecar written by `/api/process` (url,
+  upload name, created_at; survives restarts). Self-host retention default is
+  7 days. Clip cards are the same `ResultCard` as the generator.
+- **Caption defaults**: `AUTO_CAPTION_STYLE` / preset `default` / the modal's
+  initial state are the owner's look (Anton=Impact, size 34, bottom, white,
+  no highlight, effect none, border 3).
+- Tests: `tests/test_panel_auth.py`, `tests/test_channel_watch.py`, `tests/test_library.py`; `tests/conftest.py` turns the middleware
   into a pass-through for the older endpoint tests.
 
 ## Development Commands

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Sparkles, Youtube, Instagram, ChevronDown, Activity, LayoutDashboard, Settings, Plus, X, Terminal, LayoutGrid, Image, RotateCcw, Calendar, AlertTriangle, KeyRound, Loader2, Download, Menu, LogOut, Share2, Tv } from 'lucide-react';
+import { Sparkles, Youtube, Instagram, ChevronDown, Activity, LayoutDashboard, Settings, Plus, X, Terminal, LayoutGrid, Image, RotateCcw, Calendar, AlertTriangle, KeyRound, Loader2, Download, Menu, LogOut, Share2, Tv, Film } from 'lucide-react';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
@@ -11,10 +11,12 @@ import ClipEditor from './components/ClipEditor';
 import ReframeEditor from './components/ReframeEditor';
 import SettingsPanel from './components/SettingsPanel';
 import ChannelsPage from './components/ChannelsPage';
+import LibraryPage from './components/LibraryPage';
 import Modal from './components/ui/Modal';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch } from './lib/api';
 import { usePostizChannels } from './lib/postiz';
+import { applySubtitlesToAll, downloadAllClips } from './lib/clipActions';
 
 // Simple TikTok icon since Lucide might not have it or it varies
 const TikTokIcon = ({ size = 16, className = "" }) => (
@@ -125,46 +127,8 @@ function App() {
   // Apply one subtitle style to every clip of the job, sequentially.
   const handleBulkSubtitles = async (options) => {
     const clips = results?.clips || [];
-    const total = clips.length;
-    if (!total) return;
-    setBulkSub({ running: true, current: 0, total, errors: 0 });
-    let errors = 0;
-    for (let i = 0; i < total; i++) {
-      setBulkSub({ running: true, current: i + 1, total, errors });
-      try {
-        const res = await apiFetch('/api/subtitle', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            job_id: jobId,
-            clip_index: i,
-            position: options.position,
-            font_size: options.fontSize,
-            font_name: options.fontName,
-            font_color: options.fontColor,
-            border_color: options.borderColor,
-            border_width: options.borderWidth,
-            bg_color: options.bgColor,
-            bg_opacity: options.bgOpacity,
-            style: options.style || 'pill',
-            highlight_color: options.highlightColor || '#FFD700',
-            effect: options.effect || 'none',
-            base_opacity: options.baseOpacity ?? 1.0,
-            uppercase: options.uppercase || false,
-            reveal: options.reveal || false,
-            shadow: options.shadow || 0,
-            max_chars: options.maxChars ?? null,
-            max_duration: options.maxDuration ?? null,
-            // Chain from the clip's current server file (its video_url basename).
-            input_filename: (clips[i].video_url || '').split('/').pop(),
-          }),
-        });
-        if (!res.ok) errors++;
-      } catch {
-        errors++;
-      }
-    }
-    setBulkSub({ running: false, current: total, total, errors });
+    if (!clips.length) return;
+    await applySubtitlesToAll(jobId, clips, options, setBulkSub);
     try {
       const data = await pollJob(jobId);
       if (data.result) setResults(data.result);
@@ -175,17 +139,7 @@ function App() {
     if (!jobId) return;
     setDownloadingAll(true);
     try {
-      const res = await apiFetch(`/api/jobs/${jobId}/download-all`);
-      if (!res.ok) throw new Error(await res.text());
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `clips_${(jobId || '').slice(0, 8)}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      await downloadAllClips(jobId);
     } catch (e) {
       alert(`Download failed: ${e.message}`);
     } finally {
@@ -395,6 +349,7 @@ function App() {
   // bottom tab bar. `short` is the tab-bar label.
   const navItems = [
     { id: 'dashboard', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
+    { id: 'library', icon: Film, label: 'Generated Clips', short: 'library', primary: true },
     { id: 'channels', icon: Tv, label: 'Channels', short: 'channels', primary: true },
     { id: 'saasshorts', icon: Sparkles, label: 'AI Shorts', short: 'ai shorts', primary: true },
     { id: 'ugc-gallery', icon: LayoutGrid, label: 'UGC Gallery', short: 'gallery' },
@@ -605,6 +560,15 @@ function App() {
 
           {activeTab === 'settings' && (
             <SettingsPanel channels={channels} channelsError={channelsError} reloadChannels={reloadChannels} />
+          )}
+
+          {activeTab === 'library' && (
+            <LibraryPage
+              keys={keys}
+              channels={channels}
+              channelsError={channelsError}
+              onOpenSettings={openSettings}
+            />
           )}
 
           {activeTab === 'channels' && (

@@ -63,6 +63,20 @@ texte. Les vidéos plus anciennes peuvent être traitées à la main (« latest 
 schedule »). Les clips qui ne tiennent pas dans la fenêtre ne sont pas programmés (indiqué sur la
 page). État dans `data/channels.json`. `CHANNEL_WATCH_DISABLED=1` coupe le poller.
 
+## Clips générés (page « Generated Clips »)
+
+À gauche, toutes les vidéos sources traitées (YouTube ou uploads), les plus récentes en premier,
+avec recherche. Un clic affiche à droite tous leurs clips, classés par score : lecture,
+téléchargement (un par un ou tout en ZIP), sous-titres, hook, édition, recadrage, doublage,
+publication Postiz. Bouton de suppression d'un job. Les clips restent **7 jours** sur le serveur
+par défaut (`JOB_RETENTION_SECONDS`, plafond disque `OUTPUT_MAX_GB`).
+
+## Sous-titres automatiques
+
+Tous les clips générés sont sous-titrés par défaut : Impact (Anton) en majuscules, taille S, en
+bas, blanc avec contour noir de 3, sans animation ni surbrillance, sans fond
+(`subtitles.AUTO_CAPTION_STYLE`). La fenêtre « subtitles » d'un clip permet de changer le style.
+
 ## CI/CD (GitHub Actions + runner auto-hébergé)
 
 `.github/workflows/ci.yml` :

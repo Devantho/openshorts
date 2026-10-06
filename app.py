@@ -136,7 +136,7 @@ BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "").lower() in ("1", "true",
 # OUTPUT_MAX_GB / UPLOADS_MAX_GB caps below already bound the disk. Cloud keeps
 # the tight default because clips are archived to R2 as soon as a job finishes.
 JOB_RETENTION_SECONDS = int(
-    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "86400")
+    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else str(7 * 86400))
 )
 # The retained download of a URL job (--keep-original) is the one artifact that
 # is a full copy of someone else's video rather than something we made, so it
@@ -2791,6 +2791,80 @@ def _postiz_media(kind: str, job_id: str, clip_index: Optional[int]):
 postiz.configure(resolve_media=_postiz_media)
 
 
+# ---- Clips library -----------------------------------------------------------------
+
+SOURCE_SIDECAR = ".source.json"
+_YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([A-Za-z0-9_-]{11})")
+
+
+def _library_entry(job_id: str, job: dict, watch: dict) -> dict:
+    job_dir = job.get('output_dir') or os.path.join(OUTPUT_DIR, job_id)
+    source = {}
+    try:
+        with open(os.path.join(job_dir, SOURCE_SIDECAR), encoding="utf-8") as f:
+            source = json.load(f) or {}
+    except (OSError, ValueError):
+        pass
+    url = source.get("url") or _job_source_url(job)
+    created = source.get("created_at")
+    if not created:
+        try:
+            created = os.path.getctime(job_dir)
+        except OSError:
+            created = None
+    title = ""
+    metas = glob.glob(os.path.join(job_dir, "*_metadata.json"))
+    if metas:
+        title = os.path.basename(metas[0])[:-len("_metadata.json")].replace("_", " ").strip()
+    vid = None
+    if url:
+        m = _YT_ID_RE.search(url)
+        vid = m.group(1) if m else None
+    w = watch.get(job_id) or {}
+    clips = (job.get('result') or {}).get('clips') or []
+    return {
+        "job_id": job_id,
+        "status": job.get('status'),
+        "title": w.get("title") or title or source.get("upload_name") or url or job_id,
+        "url": url,
+        "upload_name": source.get("upload_name"),
+        "thumbnail": w.get("thumbnail") or (f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg" if vid else None),
+        "channel_title": w.get("channel_title"),
+        "published": w.get("published"),
+        "created_at": created,
+        "clip_count": len([c for c in clips if c.get('video_url')]),
+        "scheduled": w.get("planned") or [],
+        "watch_status": w.get("status"),
+    }
+
+
+@app.get("/api/library")
+async def library_list():
+    """Every clip job this server still holds, newest first."""
+    watch = {v["job_id"]: v for v in channel_watch._read()["videos"].values() if v.get("job_id")}
+    items = []
+    for job_id, job in list(jobs.items()):
+        if not isinstance(job, dict) or job.get('status') == 'failed' and not (job.get('result') or {}).get('clips'):
+            continue
+        items.append(_library_entry(job_id, job, watch))
+    items.sort(key=lambda e: e.get("created_at") or 0, reverse=True)
+    return {"jobs": items, "retention_seconds": JOB_RETENTION_SECONDS}
+
+
+@app.delete("/api/library/{job_id}")
+async def library_delete(job_id: str):
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get('status') in ('queued', 'processing') or _job_is_active(job_id):
+        raise HTTPException(status_code=409, detail="This job is still running.")
+    job_dir = _safe_under(OUTPUT_DIR, job_id)
+    if job_dir and os.path.isdir(job_dir):
+        shutil.rmtree(job_dir, ignore_errors=True)
+    jobs.pop(job_id, None)
+    return {"deleted": job_id}
+
+
 async def _postiz_autopost(job_id, job):
     if BILLING_ENABLED or not job:
         return
@@ -3433,6 +3507,19 @@ async def process_endpoint(
         # Read by the ClipsDelivered/JobFailed analytics event (plan).
         'user_plan': user_plan,
     }
+
+    # What the job was made from, for the Clips library (the in-memory cmd is
+    # gone after a restart, the job dir is not).
+    try:
+        os.makedirs(job_output_dir, exist_ok=True)
+        with open(os.path.join(job_output_dir, SOURCE_SIDECAR), "w", encoding="utf-8") as f:
+            json.dump({
+                "url": url or None,
+                "upload_name": (os.path.basename(file.filename) if file is not None and file.filename else None),
+                "created_at": time.time(),
+            }, f)
+    except Exception as e:
+        print(f"⚠️ Could not write the source sidecar for {job_id}: {e}")
 
     # Persist the owner so recovered jobs keep their multi-tenant guard after a
     # restart (see _recover_jobs_from_disk).
