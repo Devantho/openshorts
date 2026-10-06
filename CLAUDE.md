@@ -28,8 +28,10 @@ Cloud-mode code (`cloud/`, `BILLING_ENABLED`) is still in the tree but unused.
   `autopost_job`, called from `run_job_wrapper` after a job completes.
   Upload-Post endpoints remain in app.py but nothing in the panel calls them.
 - **Channel watch** (`channel_watch.py`, page `ChannelsPage.jsx`): followed
-  YouTube channels are polled through their public RSS feed; uploads newer
-  than the follow date go to an in-process `POST /api/process` (Bearer from
+  YouTube channels are polled (RSS feed, then the /videos page's
+  ytInitialData, then yt-dlp flat listing: the RSS feed 404s for every
+  channel since 6-oct-2026); ids not in the channel's `known_ids` (first
+  read: dated after the follow date) go to an in-process `POST /api/process` (Bearer from
   `panel_auth.issue_token()`), and `_postiz_autopost` hands those jobs to
   `channel_watch.schedule_job` instead of the generic auto-post: clips, best
   score first, take the next free daily slots (default 07:30/11:30/17:30

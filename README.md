@@ -48,8 +48,10 @@ Panel sur `http://localhost:5175`.
 
 ## Suivi de chaînes (page « Channels »)
 
-Ajoute des chaînes YouTube à suivre (URL, `@handle` ou id `UC…`). Le serveur lit leur flux RSS
-public toutes les 15 min (`CHANNEL_POLL_SECONDS`). Chaque vidéo publiée **après** l'ajout de la
+Ajoute des chaînes YouTube à suivre (URL, `@handle` ou id `UC…`). Toutes les 15 min
+(`CHANNEL_POLL_SECONDS`), le serveur lit leurs dernières vidéos : flux RSS public, sinon la page
+« Vidéos » de la chaîne, sinon yt-dlp (YouTube a coupé le RSS le 6 oct. 2026). Une vidéo dont l'id
+n'a jamais été vu est une nouveauté. Chaque vidéo publiée **après** l'ajout de la
 chaîne est envoyée au découpeur de clips. Quand le job est terminé, ses clips (meilleur score
 d'abord) sont programmés sur Postiz dans les prochains créneaux libres : **7h30, 11h30 et 17h30
 chaque jour** (heure de Paris par défaut), sur les 7 jours à venir. Les créneaux sont partagés

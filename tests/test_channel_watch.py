@@ -163,3 +163,110 @@ def test_shorts_are_skipped(store, monkeypatch):
     video = {"video_id": "S1", "url": "https://www.youtube.com/watch?v=S1", "title": "s", "published": ""}
     asyncio.run(cw.process_video(channel, video))
     assert cw._read()["videos"]["S1"]["status"] == "skipped"
+
+
+# ---- fallback sources (the RSS feed went 404 for every channel on 6-oct-2026) ----
+
+def _lockup(vid, title, when):
+    return {"richItemRenderer": {"content": {"lockupViewModel": {
+        "contentId": vid, "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+        "metadata": {"lockupMetadataViewModel": {
+            "title": {"content": title},
+            "metadata": {"contentMetadataViewModel": {"metadataRows": [{"metadataParts": [
+                {"text": {"content": "1K"}, "accessibilityLabel": "1,000 views"},
+                {"text": {"content": when}, "accessibilityLabel": when}]}]}}}}}}}}
+
+
+def _page(*items):
+    import json
+    data = {"contents": {"twoColumnBrowseResultsRenderer": {"tabs": [{"tabRenderer": {"content": {
+        "richGridRenderer": {"contents": list(items)}}}}]}}}
+    return ('<html><head><meta property="og:title" content="Ma Chaine"></head><body>'
+            f'<script>var ytInitialData = {json.dumps(data)};</script></body></html>')
+
+
+def test_relative_dates():
+    now = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
+    assert cw.relative_to_iso("3 hours ago", now) == "2026-10-06T09:00:00Z"
+    assert cw.relative_to_iso("1 day ago", now) == "2026-10-05T12:00:00Z"
+    assert cw.relative_to_iso("Streamed 2 weeks ago", now) == "2026-09-22T12:00:00Z"
+    assert cw.relative_to_iso("5d ago", now) == "2026-10-01T12:00:00Z"
+    assert cw.relative_to_iso("Scheduled for 10/8/26", now) == ""
+
+
+def test_parse_videos_page():
+    now = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
+    feed = cw.parse_videos_page(_page(_lockup("AAAAAAAAAAA", "Nouvelle", "2 hours ago"),
+                                      _lockup("BBBBBBBBBBB", "Bientôt", "Premieres 10/8/26, 6:00 PM"),
+                                      _lockup("AAAAAAAAAAA", "doublon", "2 hours ago")), now)
+    assert feed["title"] == "Ma Chaine"
+    assert [v["video_id"] for v in feed["videos"]] == ["AAAAAAAAAAA", "BBBBBBBBBBB"]
+    assert feed["videos"][0]["published"] == "2026-10-06T10:00:00Z"
+    assert feed["videos"][0]["upcoming"] is False and feed["videos"][1]["upcoming"] is True
+    assert feed["videos"][0]["url"] == "https://www.youtube.com/watch?v=AAAAAAAAAAA"
+
+
+def test_fetch_feed_falls_back_when_rss_is_gone(monkeypatch):
+    async def rss_404(channel_id):
+        raise ValueError("HTTP 404")
+
+    async def page(channel_id):
+        return {"title": "t", "videos": [{"video_id": "X"}]}
+
+    async def never(channel_id):
+        raise AssertionError("yt-dlp must not run when the page worked")
+
+    monkeypatch.setattr(cw, "_fetch_rss", rss_404)
+    monkeypatch.setattr(cw, "_fetch_videos_page", page)
+    monkeypatch.setattr(cw, "_fetch_ytdlp", never)
+    feed = asyncio.run(cw.fetch_feed("UC" + "z" * 22))
+    assert feed["source"] == "page"
+
+
+def test_fetch_feed_reports_every_source_when_all_fail(monkeypatch):
+    async def boom(channel_id):
+        raise ValueError("nope")
+
+    for name in ("_fetch_rss", "_fetch_videos_page", "_fetch_ytdlp"):
+        monkeypatch.setattr(cw, name, boom)
+    with pytest.raises(ValueError) as e:
+        asyncio.run(cw.fetch_feed("UC" + "z" * 22))
+    assert "rss: nope" in str(e.value) and "page: nope" in str(e.value) and "yt-dlp: nope" in str(e.value)
+
+
+def test_new_ids_are_detected_without_dates(store, monkeypatch):
+    cw._write({**cw._empty(), "channels": [{
+        "id": "c1", "channel_id": "UC" + "x" * 22, "title": "c", "url": "", "enabled": True,
+        "added_at": cw._iso(datetime.now(timezone.utc) - timedelta(days=1))}]})
+    listing = [{"video_id": "OLD", "title": "old", "published": "", "url": "u"}]
+
+    async def feed(channel_id):
+        return {"title": "c", "videos": list(listing)}
+
+    submitted = []
+
+    async def submit(video, settings):
+        submitted.append(video["video_id"])
+        return "job-" + video["video_id"]
+
+    async def not_short(video_id):
+        return False
+
+    monkeypatch.setattr(cw, "fetch_feed", feed)
+    monkeypatch.setattr(cw, "submit_video", submit)
+    monkeypatch.setattr(cw, "is_short", not_short)
+
+    asyncio.run(cw.check_channel("c1"))          # baseline: undated = back catalogue
+    assert submitted == []
+    assert cw._read()["channels"][0]["known_ids"] == ["OLD"]
+
+    listing[:0] = [{"video_id": "UPCOMING", "title": "p", "published": "", "upcoming": True, "url": "u"},
+                   {"video_id": "NEW2", "title": "n2", "published": "", "url": "u"},
+                   {"video_id": "NEW1", "title": "n1", "published": "", "url": "u"}]
+    asyncio.run(cw.check_channel("c1"))
+    assert submitted == ["NEW1", "NEW2"]           # oldest first, premiere left for later
+    assert "UPCOMING" not in cw._read()["channels"][0]["known_ids"]
+
+    listing[0] = {"video_id": "UPCOMING", "title": "p", "published": "", "url": "u"}   # it aired
+    asyncio.run(cw.check_channel("c1"))
+    assert submitted == ["NEW1", "NEW2", "UPCOMING"]

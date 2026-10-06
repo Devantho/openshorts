@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import uuid
@@ -211,14 +212,35 @@ async def resolve_channel(value: str) -> Dict[str, str]:
 
 
 async def fetch_feed(channel_id: str) -> Dict[str, Any]:
-    """Latest ~15 uploads from the channel's public RSS feed."""
+    """Latest uploads of a channel, newest first.
+
+    Three sources, tried in order, because YouTube changes them under us:
+    the public RSS feed (exact dates; it started answering 404 for every
+    channel on 6-oct-2026), the channel's /videos page (relative dates like
+    "3 hours ago"; Shorts and lives live in other tabs, so none leak in) and
+    yt-dlp's flat playlist listing. Newness is decided by check_channel from
+    the ids already seen, so approximate or missing dates are fine.
+    """
+    errors = []
+    for name, source in (("rss", _fetch_rss), ("page", _fetch_videos_page), ("yt-dlp", _fetch_ytdlp)):
+        try:
+            feed = await source(channel_id)
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+            continue
+        if feed["videos"]:
+            feed["source"] = name
+            return feed
+        errors.append(f"{name}: no videos")
+    raise ValueError("Could not read the channel's videos (" + "; ".join(errors) + ")")
+
+
+async def _fetch_rss(channel_id: str) -> Dict[str, Any]:
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     async with httpx.AsyncClient(timeout=20, headers={"User-Agent": _UA}) as client:
         resp = await client.get(url)
-    if resp.status_code == 404:
-        raise ValueError("Channel not found (no public feed).")
     if resp.status_code != 200:
-        raise ValueError(f"YouTube feed answered {resp.status_code}")
+        raise ValueError(f"HTTP {resp.status_code}")
     return parse_feed(resp.text)
 
 
@@ -238,6 +260,132 @@ def parse_feed(xml_text: str) -> Dict[str, Any]:
             "thumbnail": thumb.get("url") if thumb is not None else "",
             "url": f"https://www.youtube.com/watch?v={vid}",
         })
+    return {"title": title, "videos": videos}
+
+
+_REL_LONG = re.compile(r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago", re.I)
+_REL_SHORT = re.compile(r"(\d+)\s*(mo|min|s|m|h|d|w|y)\s+ago", re.I)
+_REL_UNITS = {"second": 1, "s": 1, "minute": 60, "min": 60, "m": 60, "hour": 3600, "h": 3600,
+              "day": 86400, "d": 86400, "week": 604800, "w": 604800,
+              "month": 2592000, "mo": 2592000, "year": 31536000, "y": 31536000}
+_UPCOMING = re.compile(r"scheduled for|premieres|upcoming|waiting|watching now|live now", re.I)
+
+
+def relative_to_iso(text: str, now: Optional[datetime] = None) -> str:
+    """'3 days ago' / '3d ago' -> approximate ISO date ('' when unknown)."""
+    m = _REL_LONG.search(text or "") or _REL_SHORT.search(text or "")
+    if not m:
+        return ""
+    seconds = int(m.group(1)) * _REL_UNITS[m.group(2).lower()]
+    return _iso((now or _now()) - timedelta(seconds=seconds))
+
+
+def _texts(o) -> List[str]:
+    out: List[str] = []
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k in ("content", "simpleText", "accessibilityLabel", "label", "text") and isinstance(v, str):
+                out.append(v)
+            else:
+                out.extend(_texts(v))
+    elif isinstance(o, list):
+        for x in o:
+            out.extend(_texts(x))
+    return out
+
+
+def parse_videos_page(html: str, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Videos listed in a channel's /videos page (its ytInitialData)."""
+    m = re.search(r"var ytInitialData\s*=\s*(\{.*?\});\s*</script>", html, re.S)
+    if not m:
+        raise ValueError("no ytInitialData in the page")
+    data = json.loads(m.group(1))
+    tm = re.search(r'<meta property="og:title" content="([^"]*)"', html)
+    title = tm.group(1) if tm else ""
+    found: List[Dict[str, Any]] = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            lv = o.get("lockupViewModel")
+            vr = o.get("videoRenderer") or o.get("gridVideoRenderer")
+            if isinstance(lv, dict) and lv.get("contentId") and "VIDEO" in str(lv.get("contentType", "VIDEO")):
+                md = (lv.get("metadata") or {}).get("lockupMetadataViewModel") or {}
+                found.append({"id": lv["contentId"], "title": (md.get("title") or {}).get("content") or "",
+                              "texts": _texts(md.get("metadata")) + _texts(lv.get("contentImage"))})
+                return
+            if isinstance(vr, dict) and vr.get("videoId"):
+                t = vr.get("title") or {}
+                found.append({"id": vr["videoId"],
+                              "title": t.get("simpleText") or "".join(r.get("text", "") for r in t.get("runs", [])),
+                              "texts": _texts(vr.get("publishedTimeText")) + _texts(vr.get("upcomingEventData"))
+                              + _texts(vr.get("thumbnailOverlays"))})
+                return
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for x in o:
+                walk(x)
+
+    walk(data)
+    videos, seen = [], set()
+    for item in found:
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        joined = " | ".join(item["texts"])
+        videos.append({
+            "video_id": item["id"],
+            "title": item["title"],
+            "published": relative_to_iso(joined, now),
+            "approx": True,
+            "upcoming": bool(_UPCOMING.search(joined)),
+            "thumbnail": f"https://i.ytimg.com/vi/{item['id']}/hqdefault.jpg",
+            "url": f"https://www.youtube.com/watch?v={item['id']}",
+        })
+    return {"title": title, "videos": videos}
+
+
+async def _fetch_videos_page(channel_id: str) -> Dict[str, Any]:
+    url = f"https://www.youtube.com/channel/{channel_id}/videos?hl=en"
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True, cookies=_YT_COOKIES,
+                                 headers={"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9"}) as client:
+        resp = await client.get(url)
+    if resp.status_code != 200:
+        raise ValueError(f"HTTP {resp.status_code}")
+    return parse_videos_page(resp.text)
+
+
+async def _fetch_ytdlp(channel_id: str) -> Dict[str, Any]:
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "yt_dlp", "--flat-playlist", "--dump-single-json", "--playlist-end", "15",
+        "--no-warnings", "--extractor-args", "youtubetab:approximate_date",
+        f"https://www.youtube.com/channel/{channel_id}/videos",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise ValueError("timed out")
+    if proc.returncode != 0:
+        lines = err.decode("utf-8", "replace").strip().splitlines() or ["failed"]
+        raise ValueError(lines[-1][:200])
+    data = json.loads(out)
+    videos = []
+    for e in data.get("entries") or []:
+        vid = e.get("id")
+        if not vid:
+            continue
+        ts = e.get("timestamp") or e.get("release_timestamp")
+        videos.append({
+            "video_id": vid,
+            "title": e.get("title") or vid,
+            "published": _iso(datetime.fromtimestamp(ts, timezone.utc)) if ts else "",
+            "approx": True,
+            "upcoming": e.get("live_status") in ("is_upcoming", "is_live"),
+            "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+            "url": f"https://www.youtube.com/watch?v={vid}",
+        })
+    title = data.get("channel") or data.get("uploader") or (data.get("title") or "").removesuffix(" - Videos")
     return {"title": title, "videos": videos}
 
 
@@ -333,19 +481,36 @@ async def check_channel(channel_id: str, now: Optional[datetime] = None) -> Dict
         return {"new": 0, "error": str(e)}
 
     since = _parse_iso(channel.get("added_at", "")) or now
-    fresh = [v for v in feed["videos"]
-             if v["video_id"] not in data["videos"]
-             and (_parse_iso(v["published"]) or since) > since]
+    known = channel.get("known_ids")
+    # An upcoming premiere or a live is not clippable yet: it stays out of the
+    # known ids, so it is picked up once it is a regular video.
+    listed = [v for v in feed["videos"] if not v.get("upcoming")]
+    order = {v["video_id"]: i for i, v in enumerate(listed)}
+    if known is None:
+        # First successful read: only what is dated after the follow date is
+        # new; anything undated is treated as back catalogue.
+        fresh = [v for v in listed if v["video_id"] not in data["videos"]
+                 and (_parse_iso(v.get("published", "")) or since) > since]
+    else:
+        # Afterwards an id never seen before is a new upload, whatever its
+        # (possibly approximate) date says, unless it is clearly old (a video
+        # made public long after it was uploaded).
+        seen = set(known)
+        fresh = [v for v in listed if v["video_id"] not in seen and v["video_id"] not in data["videos"]
+                 and (_parse_iso(v.get("published", "")) or now) > now - timedelta(days=7)]
 
     def ok(d):
         for c in d["channels"]:
             if c["id"] == channel_id:
-                c.update({"last_checked": _iso(now), "last_error": None,
-                          "title": feed["title"] or c.get("title")})
+                ids = [v["video_id"] for v in listed]
+                previous = [i for i in (c.get("known_ids") or []) if i not in ids]
+                c.update({"last_checked": _iso(now), "last_error": None, "source": feed.get("source"),
+                          "title": feed["title"] or c.get("title"), "known_ids": (ids + previous)[:300]})
     _update(ok)
 
-    # Oldest first, so the earliest upload gets the earliest slots.
-    for video in sorted(fresh, key=lambda v: v["published"]):
+    # Oldest first, so the earliest upload gets the earliest slots (the
+    # listing is newest first; dates may be missing or approximate).
+    for video in sorted(fresh, key=lambda v: -order[v["video_id"]]):
         await process_video(channel, video)
     return {"new": len(fresh)}
 

@@ -222,7 +222,7 @@ export default function ChannelsPage({ channels: postizChannels, channelsError, 
                       <span className="truncate">{c.title}</span> <ExternalLink size={12} className="shrink-0" />
                     </a>
                     <p className="readout mt-0.5">
-                      followed {fmtDate(c.added_at, tz, { dateStyle: 'medium' })} · checked {ago(c.last_checked)}
+                      followed {fmtDate(c.added_at, tz, { dateStyle: 'medium' })} · checked {ago(c.last_checked)}{c.source && ` · via ${c.source}`}
                     </p>
                     {c.last_error && <p className="text-xs text-danger mt-1 break-words">{c.last_error}</p>}
                   </div>
